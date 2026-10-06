@@ -11,6 +11,7 @@ mod appinfo;
 mod cdn;
 mod dirs;
 mod download;
+mod favorites;
 mod installs;
 mod kv;
 mod library;
@@ -18,6 +19,7 @@ mod local;
 mod run;
 mod session;
 mod steam;
+mod tui;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -34,8 +36,9 @@ use crate::steam::{APP_FULLY_INSTALLED, APP_RUNNING, Login, SyncDirection, SyncS
 #[derive(Parser)]
 #[command(version, about = "A small Steam client")]
 struct Cli {
+    /// Without a command, fumes opens its terminal UI.
     #[command(subcommand)]
-    command: Cmd,
+    command: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -157,14 +160,25 @@ async fn main() -> Result<()> {
     // already recovers from by retrying elsewhere.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("fumes=warn"));
+    let cli = Cli::parse();
+    let dirs = Dirs::new()?;
+    let Some(command) = cli.command else {
+        // The screen belongs to the UI, so logs go to a file instead.
+        std::fs::create_dir_all(&dirs.cache)?;
+        let log = std::fs::File::create(dirs.cache.join("fumes.log"))?;
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::sync::Mutex::new(log))
+            .with_ansi(false)
+            .init();
+        return tui::run(dirs);
+    };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = Cli::parse();
-    let dirs = Dirs::new()?;
-    match cli.command {
+    match command {
         Cmd::Login => session::login(&dirs).await,
         Cmd::Logout => session::logout(&dirs),
         Cmd::Library { installed, offline } => {
@@ -640,6 +654,11 @@ async fn load_library(dirs: &Dirs, offline: bool) -> Result<Vec<Game>> {
             },
         }
     };
+    Ok(library::merge(owned, installed_here(dirs)))
+}
+
+/// What's on this machine, installed by Steam or by fumes.
+fn installed_here(dirs: &Dirs) -> Vec<local::Installed> {
     let mut installed = local::steam_root()
         .map(|r| local::scan(&r))
         .unwrap_or_default();
@@ -657,7 +676,7 @@ async fn load_library(dirs: &Dirs, offline: bool) -> Result<Vec<Game>> {
                 by_fumes: true,
             }),
     );
-    Ok(library::merge(owned, installed))
+    installed
 }
 
 async fn fetch(dirs: &Dirs) -> Result<Vec<library::Owned>> {
@@ -695,15 +714,29 @@ fn open_steam_url(url: &str) -> Result<()> {
     if local::steam_root().is_none() {
         eprintln!("warning: no Steam install found; the link may not open anything");
     }
-    let status = if cfg!(target_os = "macos") {
-        Command::new("open").arg(url).status()
+    open_url(url)
+}
+
+/// Open a link (web page or `steam://`) with the system's handler.
+fn open_url(url: &str) -> Result<()> {
+    let mut command = if cfg!(target_os = "macos") {
+        Command::new("open")
     } else if cfg!(windows) {
         // `start`'s first quoted argument is the window title.
-        Command::new("cmd").args(["/C", "start", "", url]).status()
+        let mut start = Command::new("cmd");
+        start.args(["/C", "start", ""]);
+        start
     } else {
-        Command::new("xdg-open").arg(url).status()
-    }
-    .context("could not open the steam:// link")?;
+        Command::new("xdg-open")
+    };
+    // Quiet, so it can't scribble over the terminal UI; failures still
+    // show in the exit status.
+    let status = command
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .with_context(|| format!("could not open {url}"))?;
     if !status.success() {
         bail!("opening {url} failed");
     }

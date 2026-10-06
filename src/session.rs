@@ -95,6 +95,14 @@ pub fn credentials(dirs: &Dirs) -> Result<(String, String)> {
     Ok((saved.account, saved.refresh_token))
 }
 
+/// Who's signed in: the account name and SteamID64 (no network). `None`
+/// without a session, or once it has expired.
+pub fn signed_in(dirs: &Dirs) -> Option<(String, u64)> {
+    let saved = load(&dirs.session_file()).ok()?;
+    let token = valid_token(&saved).ok()?;
+    Some((saved.account, token.subject.into()))
+}
+
 fn valid_token(saved: &SavedSession) -> Result<RefreshToken> {
     let token = RefreshToken::new(saved.refresh_token.clone())?;
     if token.expired() {

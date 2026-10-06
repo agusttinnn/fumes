@@ -17,6 +17,16 @@ cargo run -- uninstall 12120
 cargo run -- logout
 ```
 
+`cargo run` with no command opens the terminal UI: sections on the left
+(library, friends, the store, your profile), the section's items in the
+middle, and what you can do with the selected one on the right (play,
+install, update, verify, cloud sync, DLC and store pages, uninstall).
+Arrow keys move, → or Enter goes deeper or runs the action, ← goes back;
+`/` searches the library (every word has to be in the name; initials
+like "gta" work too), `f` stars a game as a favorite so it's listed first,
+`r` refreshes from Steam and Page Up/Down scroll. Actions run the same commands as below, with the terminal handed
+over until they finish. The friends list is sample data for now.
+
 Running `install` again updates the game or repairs it, and only downloads
 what changed. `--verify` re-checks every file instead of trusting the last
 install. `install --steam` and `launch --steam` hand the job to the

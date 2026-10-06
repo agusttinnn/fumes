@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 
+#[derive(Clone)]
 pub struct Dirs {
     /// Session and machine tokens, the install list, and by default the
     /// games themselves.
@@ -33,6 +34,11 @@ impl Dirs {
     /// Games fumes installed itself.
     pub fn installs_file(&self) -> PathBuf {
         self.data.join("installs.json")
+    }
+
+    /// Games marked as favorites in the UI.
+    pub fn favorites_file(&self) -> PathBuf {
+        self.data.join("favorites.json")
     }
 
     /// The Steam engine fumes runs games with, per client build.
