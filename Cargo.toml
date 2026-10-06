@@ -1,0 +1,39 @@
+[package]
+name = "fumes"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aes = "0.8.4"
+anyhow = "1.0.104"
+base64 = "0.22.1"
+bzip2 = "0.6.1"
+cbc = "0.1.2"
+clap = { version = "4.6.7", features = ["derive"] }
+crc32fast = "1.5.2"
+directories = "6.0.0"
+flate2 = "1.1.10"
+futures = "0.3.31"
+hex = "0.4.3"
+keyvalues-parser = "0.2.4"
+lzma-rs = "0.3.0"
+regex = "1.13.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+rpassword = "7.5.4"
+ruzstd = "0.9.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sevenz-rust2 = "0.23.0"
+sha1 = "0.10.7"
+sha2 = "0.11.0"
+# 0.6 (unreleased) adds refresh-token login, so no password is kept on disk.
+steam-vent = { git = "https://codeberg.org/steam-vent/steam-vent.git", rev = "b0e40109dd7a1b5101e1546ed27f62663dbe5c4b" }
+steam-vent-proto = "0.5.2"
+tar = "0.4.46"
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "time"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
