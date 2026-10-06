@@ -1,25 +1,26 @@
-//! fumes: a small Steam library client.
+//! fumes: a small Steam client.
 //!
 //! Sign-in and the owned-games list come straight from Steam's servers via
-//! steam-vent. Games are downloaded from Steam's content servers and, where
-//! possible, started without the Steam client by swapping in gbe_fork's
-//! Steamworks emulator. Games installed by the official client are still
-//! listed and launched through it.
+//! steam-vent, and games are downloaded from Steam's content servers. To
+//! run them, fumes hosts Valve's own Steam client engine (just the engine,
+//! none of Steam's UI), so games get the real Steamworks API. Games
+//! installed by the official client are still listed and launched through
+//! it.
 
 mod appinfo;
 mod cdn;
 mod dirs;
 mod download;
-mod emu;
 mod installs;
 mod kv;
 mod library;
 mod local;
 mod run;
 mod session;
+mod steam;
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -28,9 +29,10 @@ use clap::{Parser, Subcommand};
 use crate::dirs::Dirs;
 use crate::installs::Install;
 use crate::library::Game;
+use crate::steam::{APP_FULLY_INSTALLED, APP_RUNNING, Login, SyncDirection, SyncState};
 
 #[derive(Parser)]
-#[command(version, about = "A small Steam library client")]
+#[command(version, about = "A small Steam client")]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
@@ -62,12 +64,10 @@ enum Cmd {
         /// Game language (Steam's API name, e.g. english, german, schinese).
         #[arg(long)]
         language: Option<String>,
-        /// Install folder. Defaults to <library>/<game's folder name>.
+        /// Install folder. Defaults to <library>/steamapps/common/<game's
+        /// folder name>, which the Steam engine also sees.
         #[arg(long)]
         dir: Option<PathBuf>,
-        /// Don't set up the Steamworks emulator afterwards.
-        #[arg(long)]
-        no_emu: bool,
         /// Re-check every file against Steam's hashes (repairs edited or
         /// corrupted files).
         #[arg(long)]
@@ -83,8 +83,9 @@ enum Cmd {
         #[arg(long, short)]
         yes: bool,
     },
-    /// Start a game. Games fumes installed run directly (through Wine for
-    /// Windows builds off Windows); Steam's installs go through Steam.
+    /// Play a game. For games fumes installed, fumes runs the Steam engine
+    /// (logged in as you) while the game runs; Steam's installs go through
+    /// Steam.
     Launch {
         game: String,
         /// Which of the game's launch options to use (0 is the default).
@@ -97,27 +98,67 @@ enum Cmd {
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Manage the Steamworks emulator (gbe_fork) in a game fumes installed.
-    Emu {
+    /// The Steam engine fumes runs games with.
+    Engine {
         #[command(subcommand)]
-        action: EmuCmd,
+        action: EngineCmd,
     },
 }
 
 #[derive(Subcommand)]
-enum EmuCmd {
-    /// Swap the emulator in (keeps the original libraries).
-    Enable { game: String },
-    /// Put the original Steamworks libraries back.
-    Disable { game: String },
-    /// Fetch the latest gbe_fork release.
-    Update,
+enum EngineCmd {
+    /// Download the engine now (otherwise the first launch does).
+    Fetch,
+    /// One-time setup so games can find the engine. On macOS this installs
+    /// the launchd agent Steam itself uses; elsewhere there's nothing to do.
+    Setup,
+    /// Undo `setup`.
+    Remove,
+    /// Show the engine's build, whether it's downloaded and set up.
+    Status,
+    /// Keep the engine logged in until Ctrl-C, for games started by hand.
+    Run {
+        /// Use Steam's anonymous account instead of yours.
+        #[arg(long)]
+        anonymous: bool,
+    },
+    /// Check the engine end to end with Steam's anonymous account, and
+    /// optionally that a game's Steamworks library can attach to it.
+    Test {
+        /// A libsteam_api.dylib / libsteam_api.so / steam_api64.dll to try.
+        #[arg(long)]
+        lib: Option<PathBuf>,
+        /// App the test pretends to be (480 is Valve's Spacewar test app).
+        #[arg(long, default_value_t = 480)]
+        appid: u32,
+    },
+    /// Sign in and report what the engine knows about a game's Steam Cloud.
+    #[command(hide = true)]
+    CloudInfo {
+        game: String,
+        /// Also download the cloud's saves (stops at a conflict).
+        #[arg(long)]
+        pull: bool,
+    },
+    /// The game half of `test`, run as a separate process like a real game.
+    #[command(hide = true)]
+    AttachProbe {
+        #[arg(long)]
+        lib: PathBuf,
+        #[arg(long)]
+        appid: u32,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Only fumes' own warnings unless RUST_LOG asks for more: libraries log
+    // errors (a bad certificate on one content server, say) that fumes
+    // already recovers from by retrying elsewhere.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("fumes=warn"));
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
 
@@ -136,7 +177,6 @@ async fn main() -> Result<()> {
             os,
             language,
             dir,
-            no_emu,
             verify,
             steam,
         } => {
@@ -145,7 +185,7 @@ async fn main() -> Result<()> {
                 let game = library::find(&games, &game)?;
                 return open_steam_url(&format!("steam://install/{}", game.appid));
             }
-            install(&dirs, &game, os, language, dir, verify, !no_emu).await
+            install(&dirs, &game, os, language, dir, verify).await
         }
         Cmd::Uninstall { game, yes } => uninstall(&dirs, &game, yes).await,
         Cmd::Launch {
@@ -158,14 +198,7 @@ async fn main() -> Result<()> {
             let games = load_library(&dirs, true).await?;
             let game = library::find(&games, &game)?;
             if !steam && let Some(install) = installs::load(&dirs).remove(&game.appid) {
-                if !emu::is_enabled(&install.path) && install.os != "macos" {
-                    eprintln!(
-                        "note: the emulator isn't set up for {}; if it uses Steamworks it will \
-                         look for the Steam client (`fumes emu enable {}`)",
-                        install.name, install.appid
-                    );
-                }
-                return run::launch(&install, option, &args);
+                return play(&dirs, &install, option, &args).await;
             }
             if game.installed.is_none() {
                 bail!(
@@ -177,29 +210,7 @@ async fn main() -> Result<()> {
             println!("Launching {} through Steam…", game.name);
             open_steam_url(&format!("steam://rungameid/{}", game.appid))
         }
-        Cmd::Emu { action } => match action {
-            EmuCmd::Enable { game } => {
-                let install = find_install(&dirs, &game).await?;
-                enable_emu(&dirs, &install).await
-            }
-            EmuCmd::Disable { game } => {
-                let install = find_install(&dirs, &game).await?;
-                let restored = emu::disable(&install.path)?;
-                println!(
-                    "Restored {restored} original Steamworks libraries in {}.",
-                    install.name
-                );
-                Ok(())
-            }
-            EmuCmd::Update => {
-                for os in ["windows", "linux"] {
-                    let (tag, _) = emu::release(&dirs, os, true).await?;
-                    println!("gbe_fork {tag} ({os}) is ready.");
-                }
-                println!("Run `fumes emu enable <game>` to apply it to a game.");
-                Ok(())
-            }
-        },
+        Cmd::Engine { action } => engine(&dirs, action).await,
     }
 }
 
@@ -210,7 +221,6 @@ async fn install(
     language: Option<String>,
     dir: Option<PathBuf>,
     verify: bool,
-    with_emu: bool,
 ) -> Result<()> {
     let connection = session::connect(dirs).await?;
     let owned = library::fetch_owned(&connection).await?;
@@ -225,20 +235,16 @@ async fn install(
         .or_else(|| previous.as_ref().map(|p| p.language.clone()))
         .unwrap_or_else(|| "english".into());
     let dir = match (dir, &previous) {
-        (Some(dir), _) => dir,
+        // Absolute: the Steam engine changes fumes' working folder later.
+        (Some(dir), _) => std::path::absolute(dir)?,
         (None, Some(p)) => p.path.clone(),
         (None, None) => {
             let info = appinfo::fetch(&connection, game.appid).await?;
-            dirs.library().join(&info.installdir)
+            dirs.library()
+                .join("steamapps/common")
+                .join(&info.installdir)
         }
     };
-
-    // The emulator's libraries were swapped in; put the originals back so
-    // the download sees (and if needed, updates) Steam's real files.
-    let had_emu = emu::is_enabled(&dir);
-    if had_emu {
-        emu::disable(&dir)?;
-    }
 
     let opts = download::Options {
         os,
@@ -248,6 +254,13 @@ async fn install(
     };
     let install = download::install(&connection, game.appid, &opts).await?;
     installs::put(dirs, install.clone())?;
+    if local::write_manifest(&install)?.is_none() {
+        eprintln!(
+            "note: {} isn't in a Steam library folder, so the Steam engine won't list it \
+             as installed (games still run)",
+            install.path.display()
+        );
+    }
     println!(
         "Installed {} ({}, {}) in {}",
         install.name,
@@ -255,45 +268,317 @@ async fn install(
         download::human(install.size),
         install.path.display()
     );
+    Ok(())
+}
 
-    if (with_emu || had_emu) && install.os != "macos" {
-        if let Err(e) = enable_emu(dirs, &install).await {
-            eprintln!("warning: emulator not set up: {e:#}");
-        }
-    } else if install.os == "macos" {
-        println!(
-            "Native macOS builds can't use the emulator (gbe_fork has no macOS build); \
-             games that need Steamworks will look for the Steam client. \
-             `fumes install {} --os windows` gets the Windows build for Wine instead.",
-            install.appid
+/// Run a game fumes installed with the Steam engine logged in behind it.
+async fn play(dirs: &Dirs, install: &Install, option: usize, args: &[String]) -> Result<()> {
+    let native = install.os == download::host_os();
+    let command = run::command(install, option, args)?;
+    let key = run::launch_key(install, option)?;
+
+    let runtime = engine_runtime(dirs).await?;
+    if !steam::register::ready()? {
+        bail!("games can't find the Steam engine yet; run `fumes engine setup` once");
+    }
+    // So the engine lists fumes' games as installed.
+    if let Some(root) = steam::data_dir() {
+        local::add_library_folder(&root, &dirs.library())?;
+    }
+    let (account, token) = session::credentials(dirs)?;
+    println!("Signing in to Steam…");
+    let client = start_engine(&runtime, Login::Token { account, token }).await?;
+
+    // The engine launches the game itself when it can, exactly like
+    // Steam's Play button: cloud saves come down first and go up after,
+    // with Steam's environment and playtime tracking. Otherwise fumes
+    // starts it directly, without cloud sync.
+    let installed = block(|| client.app_state(install.appid))? & APP_FULLY_INSTALLED != 0;
+    let result = if native && installed && args.is_empty() {
+        play_through_engine(&client, install, key).await
+    } else {
+        let why = if !native {
+            format!("it's a {} build running through Wine", install.os)
+        } else if !installed {
+            "the Steam engine doesn't list it as installed".to_owned()
+        } else {
+            "extra arguments were given".to_owned()
+        };
+        eprintln!(
+            "note: starting {} directly ({why}); cloud saves won't sync",
+            install.name
         );
+        play_directly(command, &install.name).await
+    };
+    stop_engine(client).await?;
+    result
+}
+
+async fn play_through_engine(client: &steam::Client, install: &Install, key: u32) -> Result<()> {
+    let appid = install.appid;
+    let name = &install.name;
+
+    // What Steam does before starting a game: bring the cloud saves down,
+    // and stop if both sides changed until you pick which to keep.
+    println!("Syncing cloud saves…");
+    if !sync_cloud(client, appid, name, SyncDirection::Down)? {
+        println!("Launch cancelled; nothing was changed.");
+        return Ok(());
+    }
+
+    println!("Launching {name}…");
+    block(|| client.launch(appid, key))?;
+    // With neither the game nor any Steam activity for a minute, the
+    // engine has given up on the launch.
+    let started = std::time::Instant::now();
+    while block(|| client.app_state(appid))? & APP_RUNNING == 0 {
+        if started.elapsed() > std::time::Duration::from_secs(60) {
+            bail!(
+                "the Steam engine didn't start {name}; its reason is in \
+                 ~/Library/Application Support/Steam/logs/content_log.txt"
+            );
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            _ = tokio::signal::ctrl_c() => {
+                println!("Launch cancelled.");
+                return Ok(());
+            }
+        }
+    }
+    println!("{name} is running.");
+
+    // Ctrl-C reaches the game too (the engine started it from this
+    // process); keep going until it's gone so the saves get uploaded.
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                if block(|| client.app_state(appid))? & APP_RUNNING == 0 {
+                    break;
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("Waiting for {name} to quit before uploading saves and signing out…");
+            }
+        }
+    }
+
+    println!("Uploading cloud saves…");
+    if !sync_cloud(client, appid, name, SyncDirection::Up)? {
+        eprintln!("warning: {name}'s saves weren't uploaded; they're kept on this machine");
     }
     Ok(())
 }
 
-async fn enable_emu(dirs: &Dirs, install: &Install) -> Result<()> {
-    let identity = session::identity(dirs)?;
-    let profile = emu::Profile {
-        appid: install.appid,
-        persona: identity.persona,
-        steam_id: identity.steam_id,
-        language: install.language.clone(),
-        dlcs: install.dlcs.clone(),
-        depots: install.depots.keys().copied().collect(),
-    };
-    let report = emu::enable(dirs, &install.path, &profile, &run::executables(install)).await?;
-    for warning in &report.warnings {
-        eprintln!("warning: {warning}");
+/// Sync one way. A conflict (both sides changed) is settled by asking;
+/// returns false if it was left unsettled, with nothing overwritten.
+fn sync_cloud(
+    client: &steam::Client,
+    appid: u32,
+    name: &str,
+    direction: SyncDirection,
+) -> Result<bool> {
+    let mut state = block(|| client.cloud_sync(appid, direction))?;
+    if state == SyncState::Conflict {
+        let Some(keep_local) = ask_conflict(name)? else {
+            return Ok(false);
+        };
+        block(|| client.resolve_conflict(appid, keep_local))?;
+        state = block(|| client.cloud_sync(appid, direction))?;
     }
-    println!(
-        "Steamworks emulator (gbe_fork {}) set up for {}: {} libraries replaced. \
-         `fumes emu disable {}` undoes it.",
-        report.release,
-        install.name,
-        report.replaced.len(),
-        install.appid
-    );
+    match state {
+        SyncState::Synchronized | SyncState::ChangesLocally if direction == SyncDirection::Down => {
+        }
+        SyncState::Synchronized => {}
+        SyncState::Disabled => println!("Steam Cloud is off for {name}."),
+        SyncState::Conflict => return Ok(false),
+        other => eprintln!("warning: {name}'s cloud saves ended up {other:?}"),
+    }
+    Ok(true)
+}
+
+async fn play_directly(mut command: Command, name: &str) -> Result<()> {
+    println!("Launching {name}…");
+    let child = command
+        .spawn()
+        .with_context(|| format!("starting {name}"))?;
+    let status = wait_for(child, name).await?;
+    if !status.success() {
+        eprintln!("{name} exited with {status}");
+    }
     Ok(())
+}
+
+/// Run a blocking call to the engine without stalling the async runtime.
+fn block<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    tokio::task::block_in_place(f)
+}
+
+/// Both sides changed since the last sync. Keep which? `None` cancels.
+fn ask_conflict(name: &str) -> Result<Option<bool>> {
+    eprintln!(
+        "{name}'s saves changed both in Steam Cloud and on this machine since they were last \
+         in sync. Whichever you don't keep is overwritten."
+    );
+    print!("Keep the [c]loud saves or the [l]ocal ones? Anything else cancels: ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    Ok(match answer.trim().to_lowercase().as_str() {
+        "c" | "cloud" => Some(false),
+        "l" | "local" => Some(true),
+        _ => None,
+    })
+}
+
+/// Wait for the game. Ctrl-C in this terminal reaches the game too; fumes
+/// stays up until it's gone so it can sign out of Steam afterwards.
+async fn wait_for(child: std::process::Child, name: &str) -> Result<std::process::ExitStatus> {
+    let mut child = child;
+    let wait = tokio::task::spawn_blocking(move || child.wait());
+    tokio::pin!(wait);
+    loop {
+        tokio::select! {
+            status = &mut wait => return Ok(status??),
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("Waiting for {name} to quit before signing out of Steam…");
+            }
+        }
+    }
+}
+
+async fn start_engine(runtime: &Path, login: Login) -> Result<steam::Client> {
+    let runtime = runtime.to_owned();
+    tokio::task::spawn_blocking(move || steam::Client::start(&runtime, login)).await?
+}
+
+async fn stop_engine(client: steam::Client) -> Result<()> {
+    tokio::task::spawn_blocking(move || client.stop()).await?
+}
+
+/// The engine for the pinned client build, downloaded on first use.
+async fn engine_runtime(dirs: &Dirs) -> Result<PathBuf> {
+    let platform = steam::runtime::host();
+    if !platform.is_fetched(&dirs.engine()) {
+        println!(
+            "Downloading the Steam engine (client build {})…",
+            platform.version()
+        );
+        platform.fetch(&dirs.engine(), false).await?;
+    }
+    Ok(platform.runtime_dir(&dirs.engine()))
+}
+
+async fn engine(dirs: &Dirs, action: EngineCmd) -> Result<()> {
+    let platform = steam::runtime::host();
+    match action {
+        EngineCmd::Fetch => {
+            let dir = platform.fetch(&dirs.engine(), false).await?;
+            println!(
+                "Steam engine (client build {}) in {}",
+                platform.version(),
+                dir.display()
+            );
+            Ok(())
+        }
+        EngineCmd::Setup => {
+            let runtime = engine_runtime(dirs).await?;
+            steam::register::install(&runtime)
+        }
+        EngineCmd::Remove => steam::register::uninstall(),
+        EngineCmd::Status => {
+            let fetched = platform.is_fetched(&dirs.engine());
+            println!(
+                "client build {} ({}): {}",
+                platform.version(),
+                platform.name,
+                if fetched {
+                    format!(
+                        "downloaded to {}",
+                        platform.runtime_dir(&dirs.engine()).display()
+                    )
+                } else {
+                    "not downloaded yet".into()
+                }
+            );
+            steam::register::status()
+        }
+        EngineCmd::Run { anonymous } => {
+            let runtime = engine_runtime(dirs).await?;
+            let login = if anonymous {
+                Login::Anonymous
+            } else {
+                let (account, token) = session::credentials(dirs)?;
+                Login::Token { account, token }
+            };
+            let client = start_engine(&runtime, login).await?;
+            println!("The Steam engine is up; start games now. Ctrl-C signs out.");
+            tokio::signal::ctrl_c().await?;
+            stop_engine(client).await
+        }
+        EngineCmd::Test { lib, appid } => {
+            let lib = lib.map(std::path::absolute).transpose()?;
+            let runtime = engine_runtime(dirs).await?;
+            steam::register::status()?;
+            let client = start_engine(&runtime, Login::Anonymous).await?;
+            println!("Engine logged in to Steam (anonymous account).");
+            // What the engine makes of fumes' installs, which is what lets
+            // it launch them (and sync their cloud saves).
+            for install in installs::load(dirs).values() {
+                let state = block(|| client.app_state(install.appid))?;
+                let seen = if state & APP_FULLY_INSTALLED != 0 {
+                    "listed as installed"
+                } else {
+                    "not listed as installed (launches without cloud sync)"
+                };
+                println!("  {}: {seen}", install.name);
+            }
+            let probe = match &lib {
+                Some(lib) => Command::new(std::env::current_exe()?)
+                    .args([
+                        "engine",
+                        "attach-probe",
+                        "--appid",
+                        &appid.to_string(),
+                        "--lib",
+                    ])
+                    .arg(lib)
+                    .status()
+                    .map(|s| s.success()),
+                None => Ok(true),
+            };
+            stop_engine(client).await?;
+            if !probe? {
+                bail!("the game library couldn't attach");
+            }
+            Ok(())
+        }
+        EngineCmd::CloudInfo { game, pull } => {
+            let games = load_library(dirs, true).await?;
+            let game = library::find(&games, &game)?;
+            let runtime = engine_runtime(dirs).await?;
+            let (account, token) = session::credentials(dirs)?;
+            let client = start_engine(&runtime, Login::Token { account, token }).await?;
+            let report = (|| -> Result<()> {
+                let (account, app) = block(|| client.cloud_enabled(game.appid))?;
+                println!("Steam Cloud on for the account: {account}");
+                println!("Steam Cloud on for {}: {app}", game.name);
+                println!(
+                    "sync state: {:?}",
+                    block(|| client.cloud_state(game.appid))?
+                );
+                println!("syncing now: {}", block(|| client.cloud_busy(game.appid))?);
+                if pull {
+                    let state = block(|| client.cloud_sync(game.appid, SyncDirection::Down))?;
+                    println!("after download: {state:?}");
+                }
+                Ok(())
+            })();
+            stop_engine(client).await?;
+            report
+        }
+        EngineCmd::AttachProbe { lib, appid } => steam::attach::attach(&lib, appid),
+    }
 }
 
 async fn uninstall(dirs: &Dirs, query: &str, yes: bool) -> Result<()> {
@@ -316,6 +601,7 @@ async fn uninstall(dirs: &Dirs, query: &str, yes: bool) -> Result<()> {
         std::fs::remove_dir_all(&install.path)
             .with_context(|| format!("deleting {}", install.path.display()))?;
     }
+    local::remove_manifest(&install);
     installs::remove(dirs, install.appid)?;
     println!("Uninstalled {}.", install.name);
     Ok(())

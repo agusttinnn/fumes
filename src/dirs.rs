@@ -35,18 +35,16 @@ impl Dirs {
         self.data.join("installs.json")
     }
 
-    /// Where new games go, one folder each. `FUMES_LIBRARY` overrides it.
+    /// The Steam engine fumes runs games with, per client build.
+    pub fn engine(&self) -> PathBuf {
+        self.data.join("engine")
+    }
+
+    /// Where new games go, laid out like a Steam library
+    /// (`steamapps/common/<game>`). `FUMES_LIBRARY` overrides it.
     pub fn library(&self) -> PathBuf {
         std::env::var_os("FUMES_LIBRARY")
             .map(PathBuf::from)
             .unwrap_or_else(|| self.data.join("library"))
-    }
-
-    #[cfg(test)]
-    pub fn for_tests(root: PathBuf) -> Self {
-        Dirs {
-            data: root.join("data"),
-            cache: root.join("cache"),
-        }
     }
 }

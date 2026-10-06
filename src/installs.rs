@@ -25,9 +25,6 @@ pub struct Install {
     pub depots: BTreeMap<u32, u64>,
     pub size: u64,
     pub launch: Vec<Launch>,
-    /// Owned DLC, for the emulator's config.
-    #[serde(default)]
-    pub dlcs: BTreeMap<u32, String>,
 }
 
 pub type Installs = BTreeMap<u32, Install>;

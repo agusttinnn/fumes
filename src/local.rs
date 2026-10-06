@@ -6,12 +6,19 @@
 //! files under `steamapps/common/<installdir>`. Both are text KeyValues
 //! (VDF). Steam isn't consistent about key case across versions, so keys are
 //! matched case-insensitively.
+//!
+//! fumes also writes these files for its own installs (its library is laid
+//! out the same way), so the Steam engine it hosts sees those games as
+//! installed.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
 use keyvalues_parser::Value;
 
+use crate::installs::Install;
 use crate::kv::get_str;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,6 +152,135 @@ fn parse_manifest(text: &str, steamapps: &Path) -> Option<Installed> {
     })
 }
 
+/// `<library>/steamapps` and the install folder name, if `game` sits where
+/// Steam keeps games (`<library>/steamapps/common/<installdir>`).
+fn steamapps_of(game: &Path) -> Option<(PathBuf, String)> {
+    let common = game.parent()?;
+    let steamapps = common.parent()?;
+    let is = |p: &Path, name: &str| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(name));
+    if !(is(common, "common") && is(steamapps, "steamapps")) {
+        return None;
+    }
+    Some((
+        steamapps.to_owned(),
+        game.file_name()?.to_string_lossy().into_owned(),
+    ))
+}
+
+fn quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Write `appmanifest_<appid>.acf` for a fumes install, the way Steam
+/// describes a fully installed game. Returns where, or `None` if the game
+/// isn't in a Steam-style library (installed with `--dir` elsewhere).
+pub fn write_manifest(install: &Install) -> Result<Option<PathBuf>> {
+    let Some((steamapps, installdir)) = steamapps_of(&install.path) else {
+        return Ok(None);
+    };
+    let updated = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut text = String::from("\"AppState\"\n{\n");
+    for (key, value) in [
+        ("appid", install.appid.to_string()),
+        ("Universe", "1".into()),
+        ("name", install.name.clone()),
+        ("StateFlags", STATE_FULLY_INSTALLED.to_string()),
+        ("installdir", installdir),
+        ("LastUpdated", updated.to_string()),
+        ("SizeOnDisk", install.size.to_string()),
+        ("buildid", install.buildid.to_string()),
+        // Update only when launched through Steam, which fumes doesn't do.
+        ("AutoUpdateBehavior", "1".into()),
+    ] {
+        let _ = writeln!(text, "\t{}\t\t{}", quote(key), quote(&value));
+    }
+    text.push_str("\t\"InstalledDepots\"\n\t{\n");
+    for (depot, manifest) in &install.depots {
+        let _ = writeln!(
+            text,
+            "\t\t\"{depot}\"\n\t\t{{\n\t\t\t\"manifest\"\t\t\"{manifest}\"\n\t\t}}"
+        );
+    }
+    text.push_str("\t}\n");
+    for section in ["UserConfig", "MountedConfig"] {
+        let _ = writeln!(
+            text,
+            "\t\"{section}\"\n\t{{\n\t\t\"language\"\t\t{}\n\t}}",
+            quote(&install.language)
+        );
+    }
+    text.push_str("}\n");
+    fs::create_dir_all(&steamapps)?;
+    let path = steamapps.join(format!("appmanifest_{}.acf", install.appid));
+    fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    Ok(Some(path))
+}
+
+pub fn remove_manifest(install: &Install) {
+    if let Some((steamapps, _)) = steamapps_of(&install.path) {
+        let _ = fs::remove_file(steamapps.join(format!("appmanifest_{}.acf", install.appid)));
+    }
+}
+
+/// Make sure `library` is one of the library folders of the Steam root
+/// `root`, adding it to `steamapps/libraryfolders.vdf` if needed (the file
+/// is created, with `root` itself as library 0, if it doesn't exist yet).
+/// Returns whether anything changed.
+pub fn add_library_folder(root: &Path, library: &Path) -> Result<bool> {
+    let path = root.join("steamapps/libraryfolders.vdf");
+    let existing = fs::read_to_string(&path).ok();
+    let folders = existing
+        .as_deref()
+        .map(parse_library_folders)
+        .unwrap_or_default();
+    if folders.iter().any(|f| f == library) {
+        return Ok(false);
+    }
+    let entry = |index: usize, folder: &Path| {
+        format!(
+            "\t\"{index}\"\n\t{{\n\t\t\"path\"\t\t{}\n\t\t\"label\"\t\t\"\"\n\t\t\"apps\"\n\t\t{{\n\t\t}}\n\t}}\n",
+            quote(&folder.to_string_lossy())
+        )
+    };
+    let text = match existing
+        .as_deref()
+        .and_then(|t| t.rfind('}').map(|end| (t, end)))
+    {
+        // Append before the closing brace, leaving Steam's own entries
+        // (and formatting) untouched.
+        Some((text, end)) => {
+            let next = numbered_keys(text).max().map_or(0, |n| n + 1);
+            format!("{}{}{}", &text[..end], entry(next, library), &text[end..])
+        }
+        None => format!(
+            "\"libraryfolders\"\n{{\n{}{}}}\n",
+            entry(0, root),
+            entry(1, library)
+        ),
+    };
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
+}
+
+/// The numbered top-level keys of a `libraryfolders.vdf`.
+fn numbered_keys(text: &str) -> impl Iterator<Item = usize> + '_ {
+    keyvalues_parser::parse(text)
+        .ok()
+        .and_then(|vdf| {
+            vdf.value.get_obj().map(|obj| {
+                obj.keys()
+                    .filter_map(|k| k.parse().ok())
+                    .collect::<Vec<usize>>()
+            })
+        })
+        .unwrap_or_default()
+        .into_iter()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,5 +351,81 @@ mod tests {
         let game = parse_manifest(text, Path::new("/lib/steamapps")).unwrap();
         assert_eq!(game.appid, 7);
         assert!(game.complete);
+    }
+
+    fn install(path: PathBuf) -> Install {
+        Install {
+            appid: 480,
+            name: "Spacewar \"Deluxe\"".into(),
+            path,
+            os: "macos".into(),
+            arch: "64".into(),
+            language: "english".into(),
+            buildid: 12345,
+            depots: std::collections::BTreeMap::from([(481, 111), (482, 222)]),
+            size: 2048,
+            launch: vec![],
+        }
+    }
+
+    #[test]
+    fn writes_a_manifest_steam_and_fumes_can_read() {
+        let lib = tempfile::tempdir().unwrap();
+        let steamapps = lib.path().join("steamapps");
+        let game = install(steamapps.join("common/Spacewar"));
+        let path = write_manifest(&game).unwrap().unwrap();
+        assert_eq!(path, steamapps.join("appmanifest_480.acf"));
+
+        let text = fs::read_to_string(&path).unwrap();
+        let parsed = parse_manifest(&text, &steamapps).unwrap();
+        assert_eq!(parsed.appid, 480);
+        assert_eq!(parsed.name, "Spacewar \"Deluxe\"");
+        assert_eq!(parsed.path, game.path);
+        assert!(parsed.complete);
+        assert_eq!(parsed.size_on_disk, 2048);
+        assert!(
+            text.contains("\"482\"\n\t\t{\n\t\t\t\"manifest\"\t\t\"222\""),
+            "{text}"
+        );
+
+        remove_manifest(&game);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn no_manifest_outside_a_steam_library() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            write_manifest(&install(dir.path().join("Games/Spacewar")))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn adds_library_folders_without_touching_steams_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let library = PathBuf::from("/Users/me/fumes library");
+
+        // No file yet: the root becomes library 0, ours library 1.
+        assert!(add_library_folder(root.path(), &library).unwrap());
+        assert!(!add_library_folder(root.path(), &library).unwrap());
+        let file = root.path().join("steamapps/libraryfolders.vdf");
+        assert_eq!(
+            parse_library_folders(&fs::read_to_string(&file).unwrap()),
+            [root.path().to_owned(), library.clone()]
+        );
+
+        // Steam's own file: appended after its highest entry.
+        let steam = "\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\"/root\"\n\t\t\"contentid\"\t\t\"77\"\n\t}\n\t\"3\"\n\t{\n\t\t\"path\"\t\t\"/ext\"\n\t}\n}\n";
+        fs::write(&file, steam).unwrap();
+        assert!(add_library_folder(root.path(), &library).unwrap());
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with(&steam[..steam.len() - 2]), "{text}");
+        assert!(text.contains("\t\"4\"\n"), "{text}");
+        assert_eq!(
+            parse_library_folders(&text),
+            [PathBuf::from("/root"), PathBuf::from("/ext"), library]
+        );
     }
 }

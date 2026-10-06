@@ -146,10 +146,15 @@ impl Cdn {
                 } else {
                     s.vhost()
                 };
-                let scheme = if s.https_support() == "none" {
-                    "http"
-                } else {
+                // Like Steam itself: HTTPS only where the server demands
+                // it. Many caches' certificates don't match the name they're
+                // listed under, and the content doesn't rely on transport
+                // security: chunks and file names are encrypted with the
+                // depot key and checked against the manifest's hashes.
+                let scheme = if s.https_support() == "mandatory" {
                     "https"
+                } else {
+                    "http"
                 };
                 format!("{scheme}://{host}")
             })

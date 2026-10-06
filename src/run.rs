@@ -1,4 +1,5 @@
-//! Starting a game fumes installed, without the Steam client.
+//! Starting a game fumes installed. The Steam engine fumes hosts (see
+//! `steam`) is what the game's Steamworks calls reach.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,15 +32,29 @@ pub fn launch_options(install: &Install) -> Vec<&Launch> {
     options
 }
 
-/// The executables a launch option might start, for the SteamStub check.
-pub fn executables(install: &Install) -> Vec<PathBuf> {
-    launch_options(install)
+/// The app info key of the chosen launch option, which the Steam engine
+/// launches by. Installs recorded before keys were kept fall back to the
+/// entry's position, which matches Steam's numbering for most apps.
+pub fn launch_key(install: &Install, option: usize) -> Result<u32> {
+    let options = launch_options(install);
+    let chosen = *options
+        .get(option)
+        .with_context(|| format!("{} has no launch option {option}", install.name))?;
+    if let Some(key) = chosen.key {
+        return Ok(key);
+    }
+    let position = install
+        .launch
         .iter()
-        .map(|l| install.path.join(normalize(&l.executable)))
-        .collect()
+        .position(|l| std::ptr::eq(l, chosen))
+        .unwrap_or(0);
+    Ok(position as u32)
 }
 
-pub fn launch(install: &Install, option: usize, extra: &[String]) -> Result<()> {
+/// The process that starts the game: its executable (through Wine for a
+/// Windows build elsewhere), arguments, working folder, and the environment
+/// the Steam client sets for the games it starts.
+pub fn command(install: &Install, option: usize, extra: &[String]) -> Result<Command> {
     let options = launch_options(install);
     let Some(launch) = options.get(option) else {
         if options.is_empty() {
@@ -86,15 +101,7 @@ pub fn launch(install: &Install, option: usize, extra: &[String]) -> Result<()> 
         .env("SteamAppId", install.appid.to_string())
         .env("SteamGameId", install.appid.to_string())
         .env("SteamOverlayGameId", install.appid.to_string());
-
-    println!("Launching {}…", install.name);
-    let status = command
-        .status()
-        .with_context(|| format!("starting {}", exe.display()))?;
-    if !status.success() {
-        eprintln!("{} exited with {status}", install.name);
-    }
-    Ok(())
+    Ok(command)
 }
 
 /// Run the file itself, or for a macOS bundle the binary inside it (going
@@ -190,6 +197,7 @@ mod tests {
 
     fn launch(exe: &str, kind: &str, oslist: &[&str], osarch: Option<&str>) -> Launch {
         Launch {
+            key: None,
             executable: exe.into(),
             arguments: String::new(),
             workingdir: String::new(),
@@ -223,15 +231,23 @@ mod tests {
                 launch("bin\\win64\\game.exe", "default", &["windows"], Some("64")),
                 beta,
             ],
-            dlcs: BTreeMap::new(),
         };
         let exes: Vec<&str> = launch_options(&install)
             .iter()
             .map(|l| l.executable.as_str())
             .collect();
         assert_eq!(exes, ["bin\\win64\\game.exe", "safe.exe"]);
+        // No recorded keys: positions in app info order.
+        assert_eq!(launch_key(&install, 0).unwrap(), 4);
+        assert_eq!(launch_key(&install, 1).unwrap(), 1);
+        assert!(launch_key(&install, 2).is_err());
+        let mut keyed = install.clone();
+        keyed.launch[4].key = Some(7);
+        assert_eq!(launch_key(&keyed, 0).unwrap(), 7);
         assert_eq!(
-            executables(&install)[0],
+            install
+                .path
+                .join(normalize(&launch_options(&install)[0].executable)),
             PathBuf::from("/games/Game/bin/win64/game.exe")
         );
     }

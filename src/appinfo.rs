@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use futures::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use steam_vent::{Connection, ConnectionTrait};
@@ -20,7 +20,6 @@ use steam_vent_proto::steammessages_clientserver_appinfo::{
     CMsgClientPICSProductInfoRequest, CMsgClientPICSProductInfoResponse,
     cmsg_client_picsproduct_info_request,
 };
-use steam_vent_proto::steammessages_player_steamclient::CPlayer_GetPlayerLinkDetails_Request;
 
 use crate::kv;
 
@@ -59,6 +58,10 @@ pub struct Depot {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Launch {
+    /// The entry's key in app info (`config/launch/<key>`), which is how
+    /// Steam names a launch option.
+    #[serde(default)]
+    pub key: Option<u32>,
     pub executable: String,
     pub arguments: String,
     pub workingdir: String,
@@ -78,23 +81,6 @@ pub async fn fetch(connection: &Connection, appid: u32) -> Result<AppInfo> {
         .remove(&appid)
         .with_context(|| format!("Steam returned no info for app {appid}"))?;
     parse(appid, &text).with_context(|| format!("app {appid}'s info is malformed"))
-}
-
-/// Names of several apps (DLCs, mostly). Apps Steam won't describe are left
-/// out.
-pub async fn names(connection: &Connection, appids: &[u32]) -> Result<BTreeMap<u32, String>> {
-    if appids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let texts = fetch_raw(connection, appids).await?;
-    Ok(texts
-        .into_iter()
-        .filter_map(|(appid, text)| {
-            let vdf = kv::parse(&text)?;
-            let common = kv::get_obj(vdf.value.get_obj()?, "common")?;
-            Some((appid, kv::get_str(common, "name")?.to_owned()))
-        })
-        .collect())
 }
 
 async fn fetch_raw(connection: &Connection, appids: &[u32]) -> Result<BTreeMap<u32, String>> {
@@ -193,26 +179,6 @@ pub async fn owned_of(connection: &Connection, appids: &[u32]) -> Result<Vec<u32
         .collect())
 }
 
-/// The account's public display name, which is what games should show
-/// (the login name is a credential and stays private).
-pub async fn persona_name(connection: &Connection) -> Result<String> {
-    let response = connection
-        .service_method(CPlayer_GetPlayerLinkDetails_Request {
-            steamids: vec![connection.steam_id().into()],
-            ..Default::default()
-        })
-        .await?;
-    let name = response
-        .accounts
-        .first()
-        .map(|a| a.public_data.persona_name().to_owned())
-        .unwrap_or_default();
-    if name.is_empty() {
-        bail!("Steam returned no persona name");
-    }
-    Ok(name)
-}
-
 pub fn parse(appid: u32, text: &str) -> Option<AppInfo> {
     let vdf = kv::parse(text)?;
     let root = vdf.value.get_obj()?;
@@ -235,7 +201,7 @@ pub fn parse(appid: u32, text: &str) -> Option<AppInfo> {
         .and_then(|c| kv::get_obj(c, "launch"))
         .map(|l| {
             numbered(l)
-                .filter_map(|(_, entry)| parse_launch(entry))
+                .filter_map(|(key, entry)| parse_launch(key, entry))
                 .collect()
         })
         .unwrap_or_default();
@@ -291,13 +257,14 @@ fn numbered<'a>(
     })
 }
 
-fn parse_launch(entry: &keyvalues_parser::Obj) -> Option<Launch> {
+fn parse_launch(key: u32, entry: &keyvalues_parser::Obj) -> Option<Launch> {
     let executable = kv::get_str(entry, "executable")?.trim();
     if executable.is_empty() {
         return None;
     }
     let config = kv::get_obj(entry, "config");
     Some(Launch {
+        key: Some(key),
         executable: executable.to_owned(),
         arguments: kv::get_str(entry, "arguments")
             .unwrap_or_default()
@@ -499,6 +466,7 @@ mod tests {
         assert_eq!(info.launch[0].executable, r"bin\win64\game.exe");
         assert_eq!(info.launch[0].arguments, "-steam -novid");
         assert_eq!(info.launch[1].oslist, ["macos"]);
+        assert_eq!(info.launch[1].key, Some(1));
     }
 
     #[test]

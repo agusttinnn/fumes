@@ -46,9 +46,6 @@ pub async fn install(connection: &Connection, appid: u32, opts: &Options) -> Res
     let os = pick_os(&info.oslist, opts.os.as_deref(), host_os())?;
 
     let owned_dlcs = appinfo::owned_of(connection, &info.dlcs).await?;
-    let dlc_names = appinfo::names(connection, &owned_dlcs)
-        .await
-        .unwrap_or_default();
     let depots = select_depots(&info.depots, &os, ARCH, &opts.language, &owned_dlcs);
     if depots.is_empty() {
         bail!("{} has no downloadable {os} content", info.name);
@@ -128,16 +125,6 @@ pub async fn install(connection: &Connection, appid: u32, opts: &Options) -> Res
         depots: manifests.iter().map(|(m, _)| (m.depot, m.gid)).collect(),
         size,
         launch: info.launch.clone(),
-        dlcs: owned_dlcs
-            .iter()
-            .map(|id| {
-                let name = dlc_names
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("DLC {id}"));
-                (*id, name)
-            })
-            .collect(),
     })
 }
 
@@ -389,10 +376,13 @@ async fn report_progress(done: Arc<AtomicU64>, total: u64) {
 fn finish(dir: &Path, files: &Files, previous: &State) -> Result<()> {
     let fetched: std::collections::HashSet<u32> = files.values().map(|(_, d)| *d).collect();
     for (name, (file, _)) in files {
+        let path = dir.join(name);
         if file.flags & flags::SYMLINK != 0 {
             make_symlink(dir, name, file.link_target.as_deref().unwrap_or_default())?;
-        } else if file.flags & flags::EXECUTABLE != 0 {
-            make_executable(&dir.join(name))?;
+        } else if file.flags & flags::DIRECTORY != 0 {
+            continue;
+        } else if file.flags & flags::EXECUTABLE != 0 || looks_executable(&path) {
+            make_executable(&path)?;
         }
     }
     for (name, old) in &previous.files {
@@ -401,6 +391,26 @@ fn finish(dir: &Path, files: &Files, previous: &State) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Programs a depot doesn't flag as executable: Mac and Linux depots
+/// uploaded from Windows lose the bit, and Steam marks them anyway. Mach-O
+/// (thin or universal), ELF, or a `#!` script.
+fn looks_executable(path: &Path) -> bool {
+    let mut head = [0u8; 4];
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    if file.read_exact(&mut head).is_err() {
+        return false;
+    }
+    matches!(
+        head,
+        [0xfe, 0xed, 0xfa, 0xce | 0xcf]
+            | [0xce | 0xcf, 0xfa, 0xed, 0xfe]
+            | [0xca, 0xfe, 0xba, 0xbe]
+            | [0x7f, b'E', b'L', b'F']
+    ) || head.starts_with(b"#!")
 }
 
 #[cfg(unix)]
@@ -726,5 +736,50 @@ mod tests {
         assert!(!dir.path().join("dropped").exists());
         // Depot 2 wasn't part of this run (refused, or deselected).
         assert!(dir.path().join("other_depot").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn marks_unflagged_programs_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut files = Files::new();
+        for (name, bytes) in [
+            (
+                "Game.app/Contents/MacOS/Game",
+                &b"#!/bin/bash\nexec ./Game.bin\n"[..],
+            ),
+            (
+                "Game.app/Contents/MacOS/Game.bin",
+                &[0xcf, 0xfa, 0xed, 0xfe, 7][..],
+            ),
+            (
+                "Game.app/Contents/MacOS/universal",
+                &[0xca, 0xfe, 0xba, 0xbe, 0][..],
+            ),
+            ("linux/game", &[0x7f, b'E', b'L', b'F', 2][..]),
+            ("data/level.pak", &b"PAK\0data"[..]),
+            ("tiny", &b"#"[..]),
+        ] {
+            let path = dir.path().join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, bytes).unwrap();
+            files.insert(name.into(), (entry(name, bytes, 10), 1));
+        }
+        finish(dir.path(), &files, &State::default()).unwrap();
+        let exec = |name: &str| {
+            fs::metadata(dir.path().join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111
+                != 0
+        };
+        assert!(exec("Game.app/Contents/MacOS/Game"));
+        assert!(exec("Game.app/Contents/MacOS/Game.bin"));
+        assert!(exec("Game.app/Contents/MacOS/universal"));
+        assert!(exec("linux/game"));
+        assert!(!exec("data/level.pak"));
+        assert!(!exec("tiny"));
     }
 }

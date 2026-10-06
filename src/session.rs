@@ -17,25 +17,12 @@ use steam_vent::auth::{
 };
 use steam_vent::{Connection, ServerList};
 
-use crate::appinfo;
 use crate::dirs::Dirs;
 
 #[derive(Serialize, Deserialize)]
 struct SavedSession {
     account: String,
     refresh_token: String,
-    /// Kept so the emulator can be configured offline. Older session files
-    /// lack them; the next connection fills them in.
-    #[serde(default)]
-    steam_id: u64,
-    #[serde(default)]
-    persona: String,
-}
-
-/// Who's signed in, as games should see them.
-pub struct Identity {
-    pub steam_id: u64,
-    pub persona: String,
 }
 
 /// Interactive password login. Steam Guard is handled either by typing the
@@ -62,14 +49,11 @@ pub async fn login(dirs: &Dirs) -> Result<()> {
     .await
     .context("login failed")?;
 
-    let persona = appinfo::persona_name(&connection).await.unwrap_or_default();
     save(
         &dirs.session_file(),
         &SavedSession {
             account: account.clone(),
             refresh_token: connection.refresh_token().token().to_owned(),
-            steam_id: connection.steam_id().into(),
-            persona,
         },
     )?;
     println!("Signed in as {account}.");
@@ -89,54 +73,34 @@ pub fn logout(dirs: &Dirs) -> Result<()> {
 pub async fn connect(dirs: &Dirs) -> Result<Connection> {
     let path = dirs.session_file();
     let mut saved = load(&path)?;
-    let token = RefreshToken::new(saved.refresh_token.clone())?;
-    if token.expired() {
-        bail!("session expired; run `fumes login`");
-    }
+    let token = valid_token(&saved)?;
 
     let servers = ServerList::discover().await?;
     let connection = Connection::login_with_refresh_token(&servers, &token)
         .await
         .context("could not resume the session; run `fumes login`")?;
 
-    let mut changed = false;
     if connection.refresh_token().token() != saved.refresh_token {
         saved.refresh_token = connection.refresh_token().token().to_owned();
-        changed = true;
-    }
-    if saved.steam_id == 0 {
-        saved.steam_id = connection.steam_id().into();
-        changed = true;
-    }
-    if saved.persona.is_empty()
-        && let Ok(persona) = appinfo::persona_name(&connection).await
-    {
-        saved.persona = persona;
-        changed = true;
-    }
-    if changed {
         save(&path, &saved)?;
     }
     Ok(connection)
 }
 
-/// The signed-in account's SteamID and display name, from the session file
-/// (no network). Falls back to "Player" if the name was never fetched.
-pub fn identity(dirs: &Dirs) -> Result<Identity> {
+/// The account name and refresh token, for the Steam engine's own login
+/// (no network).
+pub fn credentials(dirs: &Dirs) -> Result<(String, String)> {
     let saved = load(&dirs.session_file())?;
-    if saved.steam_id == 0 {
-        bail!(
-            "the session predates fumes storing your SteamID; run any online command (like `fumes library`) once"
-        );
+    valid_token(&saved)?;
+    Ok((saved.account, saved.refresh_token))
+}
+
+fn valid_token(saved: &SavedSession) -> Result<RefreshToken> {
+    let token = RefreshToken::new(saved.refresh_token.clone())?;
+    if token.expired() {
+        bail!("session expired; run `fumes login`");
     }
-    Ok(Identity {
-        steam_id: saved.steam_id,
-        persona: if saved.persona.is_empty() {
-            "Player".into()
-        } else {
-            saved.persona
-        },
-    })
+    Ok(token)
 }
 
 fn load(path: &Path) -> Result<SavedSession> {
