@@ -358,22 +358,74 @@ pub fn incoming(
         return None;
     }
     let invite = game_invite(notification.message());
-    let text = match (notification.message_no_bbcode(), notification.message()) {
-        ("", "") => return None,
-        _ if invite.is_some() => "invited you to play",
-        ("", _) => NOT_TEXT,
-        (plain, _) => plain,
+    // Steam fills `message_no_bbcode` only for messages with markup in
+    // them; for plain ones it's empty and `message` is the text.
+    let text = match notification.message_no_bbcode() {
+        "" => plain(notification.message()),
+        plain => plain.to_owned(),
+    };
+    let text = match text.trim() {
+        _ if invite.is_some() => "invited you to play".to_owned(),
+        "" if notification.message().is_empty() => return None,
+        "" => NOT_TEXT.to_owned(),
+        _ => text,
     };
     Some((
         notification.steamid_friend(),
         Message {
             // Sent by this account from another device.
             from_me: notification.local_echo(),
-            text: text.to_owned(),
+            text,
             time: notification.rtime32_server_timestamp(),
             invite,
         },
     ))
+}
+
+/// A message without Steam's markup: tags like `[b]`, `[/url]` or
+/// `[img src="…"]` go, the text between them stays, and brackets the
+/// sender typed (escaped as `\[`) come back.
+fn plain(markup: &str) -> String {
+    let mut out = String::with_capacity(markup.len());
+    let mut rest = markup;
+    while let Some(at) = rest.find(['[', '\\']) {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        if let Some(escaped) = rest.strip_prefix('\\') {
+            let mut chars = escaped.chars();
+            match chars.next() {
+                Some(c @ ('[' | ']' | '\\')) => out.push(c),
+                Some(c) => {
+                    out.push('\\');
+                    out.push(c);
+                }
+                None => out.push('\\'),
+            }
+            rest = chars.as_str();
+            continue;
+        }
+        let tag = &rest[1..];
+        let name = tag.strip_prefix('/').unwrap_or(tag);
+        let is_tag = name.starts_with(|c: char| c.is_ascii_alphabetic())
+            && name.find(']').is_some_and(|end| {
+                name[..end].split_whitespace().next().is_some_and(|n| {
+                    n.split('=')
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric())
+                })
+            });
+        match tag.find(']') {
+            Some(end) if is_tag => rest = &tag[end + 1..],
+            _ => {
+                out.push('[');
+                rest = tag;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Show this session as online, so Steam delivers messages to it and
@@ -631,6 +683,36 @@ mod tests {
     }
 
     #[test]
+    fn takes_steams_markup_out_of_messages() {
+        assert_eq!(plain("hello there"), "hello there");
+        assert_eq!(plain("look [b]at this[/b]!"), "look at this!");
+        assert_eq!(plain(r#"[img src="https://x/y.png"][/img]"#), "");
+        assert_eq!(plain(r#"[url=https://a.b]a link[/url]"#), "a link");
+        assert_eq!(plain(r"\[not a tag\] [1] [ ok"), "[not a tag] [1] [ ok");
+        assert_eq!(plain("a\\b"), "a\\b");
+    }
+
+    #[test]
+    fn plain_messages_show_their_text() {
+        let notification =
+            |message: &str, no_bbcode: &str| CFriendMessages_IncomingMessage_Notification {
+                steamid_friend: Some(1),
+                chat_entry_type: Some(CHAT_MESSAGE),
+                message: Some(message.into()),
+                message_no_bbcode: Some(no_bbcode.into()),
+                ..Default::default()
+            };
+        let text = |n| incoming(&n).map(|(_, m)| m.text);
+        // What Steam sends for plain text: nothing in message_no_bbcode.
+        assert_eq!(text(notification("hi!", "")).as_deref(), Some("hi!"));
+        assert_eq!(text(notification("[b]hi[/b]", "hi")).as_deref(), Some("hi"));
+        assert_eq!(
+            text(notification(r#"[sticker type="Cat"][/sticker]"#, "")).as_deref(),
+            Some(NOT_TEXT)
+        );
+    }
+
+    #[test]
     fn finds_game_invites_in_message_markup() {
         assert_eq!(
             game_invite(r#"[lobbyinvite lobbyid="109775241234567890"][/lobbyinvite]"#),
@@ -709,4 +791,3 @@ mod tests {
         assert_eq!(friend.join(), None);
     }
 }
-
