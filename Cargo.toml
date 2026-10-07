@@ -17,7 +17,7 @@ hex = "0.4.3"
 keyvalues-parser = "0.2.4"
 libloading = "0.8"
 lzma-rs = "0.3.0"
-ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache", "unstable-rendered-line-info"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 rpassword = "7.5.4"
 ruzstd = "0.9.0"
@@ -28,7 +28,7 @@ sha2 = "0.11.0"
 # 0.6 (unreleased) adds refresh-token login, so no password is kept on disk.
 steam-vent = { git = "https://codeberg.org/steam-vent/steam-vent.git", rev = "b0e40109dd7a1b5101e1546ed27f62663dbe5c4b" }
 steam-vent-proto = "0.5.2"
-tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.53.2", features = ["io-util", "macros", "rt-multi-thread", "signal", "time"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

@@ -12,6 +12,7 @@ mod cdn;
 mod dirs;
 mod download;
 mod favorites;
+mod friends;
 mod installs;
 mod kv;
 mod library;
@@ -32,6 +33,7 @@ use crate::dirs::Dirs;
 use crate::installs::Install;
 use crate::library::Game;
 use crate::steam::{APP_FULLY_INSTALLED, APP_RUNNING, Login, SyncDirection, SyncState};
+use crate::tui::game::{self, report, report_problem};
 
 #[derive(Parser)]
 #[command(version, about = "A small Steam client")]
@@ -236,6 +238,7 @@ async fn install(
     dir: Option<PathBuf>,
     verify: bool,
 ) -> Result<()> {
+    println!("Connecting to Steam…");
     let connection = session::connect(dirs).await?;
     let owned = library::fetch_owned(&connection).await?;
     library::save_cache(&dirs.library_cache(), &owned)?;
@@ -300,7 +303,7 @@ async fn play(dirs: &Dirs, install: &Install, option: usize, args: &[String]) ->
         local::add_library_folder(&root, &dirs.library())?;
     }
     let (account, token) = session::credentials(dirs)?;
-    println!("Signing in to Steam…");
+    report(format_args!("Signing in to Steam…"));
     let client = start_engine(&runtime, Login::Token { account, token }).await?;
 
     // The engine launches the game itself when it can, exactly like
@@ -308,40 +311,44 @@ async fn play(dirs: &Dirs, install: &Install, option: usize, args: &[String]) ->
     // with Steam's environment and playtime tracking. Otherwise fumes
     // starts it directly, without cloud sync.
     let installed = block(|| client.app_state(install.appid))? & APP_FULLY_INSTALLED != 0;
-    let result = if native && installed && args.is_empty() {
-        play_through_engine(&client, install, key).await
+    let result = if native && installed {
+        play_through_engine(&client, install, key, &args.join(" ")).await
     } else {
         let why = if !native {
             format!("it's a {} build running through Wine", install.os)
-        } else if !installed {
-            "the Steam engine doesn't list it as installed".to_owned()
         } else {
-            "extra arguments were given".to_owned()
+            "the Steam engine doesn't list it as installed".to_owned()
         };
-        eprintln!(
+        report_problem(format_args!(
             "note: starting {} directly ({why}); cloud saves won't sync",
             install.name
-        );
+        ));
         play_directly(command, &install.name).await
     };
     stop_engine(client).await?;
     result
 }
 
-async fn play_through_engine(client: &steam::Client, install: &Install, key: u32) -> Result<()> {
+/// `args` go on the game's command line after its launch entry's own.
+async fn play_through_engine(
+    client: &steam::Client,
+    install: &Install,
+    key: u32,
+    args: &str,
+) -> Result<()> {
     let appid = install.appid;
     let name = &install.name;
 
     // What Steam does before starting a game: bring the cloud saves down,
     // and stop if both sides changed until you pick which to keep.
-    println!("Syncing cloud saves…");
+    report(format_args!("Syncing cloud saves…"));
     if !sync_cloud(client, appid, name, SyncDirection::Down)? {
-        println!("Launch cancelled; nothing was changed.");
+        report(format_args!("Launch cancelled; nothing was changed."));
         return Ok(());
     }
 
-    println!("Launching {name}…");
-    block(|| client.launch(appid, key))?;
+    report(format_args!("Launching {name}…"));
+    block(|| client.launch(appid, key, args))?;
     // With neither the game nor any Steam activity for a minute, the
     // engine has given up on the launch.
     let started = std::time::Instant::now();
@@ -355,12 +362,12 @@ async fn play_through_engine(client: &steam::Client, install: &Install, key: u32
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
             _ = tokio::signal::ctrl_c() => {
-                println!("Launch cancelled.");
+                report(format_args!("Launch cancelled."));
                 return Ok(());
             }
         }
     }
-    println!("{name} is running.");
+    report(format_args!("{name} is running."));
 
     // Ctrl-C reaches the game too (the engine started it from this
     // process); keep going until it's gone so the saves get uploaded.
@@ -372,14 +379,16 @@ async fn play_through_engine(client: &steam::Client, install: &Install, key: u32
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                eprintln!("Waiting for {name} to quit before uploading saves and signing out…");
+                report_problem(format_args!("Waiting for {name} to quit before uploading saves and signing out…"));
             }
         }
     }
 
-    println!("Uploading cloud saves…");
+    report(format_args!("Uploading cloud saves…"));
     if !sync_cloud(client, appid, name, SyncDirection::Up)? {
-        eprintln!("warning: {name}'s saves weren't uploaded; they're kept on this machine");
+        report_problem(format_args!(
+            "warning: {name}'s saves weren't uploaded; they're kept on this machine"
+        ));
     }
     Ok(())
 }
@@ -404,21 +413,23 @@ fn sync_cloud(
         SyncState::Synchronized | SyncState::ChangesLocally if direction == SyncDirection::Down => {
         }
         SyncState::Synchronized => {}
-        SyncState::Disabled => println!("Steam Cloud is off for {name}."),
+        SyncState::Disabled => report(format_args!("Steam Cloud is off for {name}.")),
         SyncState::Conflict => return Ok(false),
-        other => eprintln!("warning: {name}'s cloud saves ended up {other:?}"),
+        other => report_problem(format_args!(
+            "warning: {name}'s cloud saves ended up {other:?}"
+        )),
     }
     Ok(true)
 }
 
 async fn play_directly(mut command: Command, name: &str) -> Result<()> {
-    println!("Launching {name}…");
+    report(format_args!("Launching {name}…"));
     let child = command
         .spawn()
         .with_context(|| format!("starting {name}"))?;
     let status = wait_for(child, name).await?;
     if !status.success() {
-        eprintln!("{name} exited with {status}");
+        report_problem(format_args!("{name} exited with {status}"));
     }
     Ok(())
 }
@@ -429,12 +440,17 @@ fn block<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 }
 
 /// Both sides changed since the last sync. Keep which? `None` cancels.
+/// When the terminal UI runs this, it does the asking.
 fn ask_conflict(name: &str) -> Result<Option<bool>> {
-    eprintln!(
-        "{name}'s saves changed both in Steam Cloud and on this machine since they were last \
-         in sync. Whichever you don't keep is overwritten."
-    );
-    print!("Keep the [c]loud saves or the [l]ocal ones? Anything else cancels: ");
+    if game::from_ui() {
+        println!("{}", game::CONFLICT_PROMPT);
+    } else {
+        eprintln!(
+            "{name}'s saves changed both in Steam Cloud and on this machine since they were \
+             last in sync. Whichever you don't keep is overwritten."
+        );
+        print!("Keep the [c]loud saves or the [l]ocal ones? Anything else cancels: ");
+    }
     io::stdout().flush()?;
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
@@ -455,7 +471,7 @@ async fn wait_for(child: std::process::Child, name: &str) -> Result<std::process
         tokio::select! {
             status = &mut wait => return Ok(status??),
             _ = tokio::signal::ctrl_c() => {
-                eprintln!("Waiting for {name} to quit before signing out of Steam…");
+                report_problem(format_args!("Waiting for {name} to quit before signing out of Steam…"));
             }
         }
     }
@@ -474,10 +490,10 @@ async fn stop_engine(client: steam::Client) -> Result<()> {
 async fn engine_runtime(dirs: &Dirs) -> Result<PathBuf> {
     let platform = steam::runtime::host();
     if !platform.is_fetched(&dirs.engine()) {
-        println!(
+        report(format_args!(
             "Downloading the Steam engine (client build {})…",
             platform.version()
-        );
+        ));
         platform.fetch(&dirs.engine(), false).await?;
     }
     Ok(platform.runtime_dir(&dirs.engine()))
@@ -572,6 +588,7 @@ async fn engine(dirs: &Dirs, action: EngineCmd) -> Result<()> {
             let game = library::find(&games, &game)?;
             let runtime = engine_runtime(dirs).await?;
             let (account, token) = session::credentials(dirs)?;
+            println!("Signing in to Steam…");
             let client = start_engine(&runtime, Login::Token { account, token }).await?;
             let report = (|| -> Result<()> {
                 let (account, app) = block(|| client.cloud_enabled(game.appid))?;

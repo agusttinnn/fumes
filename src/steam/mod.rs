@@ -13,6 +13,7 @@ mod engine;
 pub mod register;
 pub mod runtime;
 
+use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,7 +46,7 @@ pub struct Client {
 /// Work for the engine thread, which alone may call into the engine. Each
 /// carries where to send its answer.
 enum Command {
-    Launch(u32, u32, mpsc::Sender<Result<u64>>),
+    Launch(u32, u32, String, mpsc::Sender<Result<u64>>),
     AppState(u32, mpsc::Sender<Result<u32>>),
     CloudState(u32, mpsc::Sender<Result<SyncState>>),
     CloudBusy(u32, mpsc::Sender<Result<bool>>),
@@ -93,10 +94,13 @@ impl Client {
 
     /// Launch an installed app the way Steam's Play button does (cloud
     /// sync, Steam's environment, playtime). `option` is the app info
-    /// launch entry's key. Returns once the engine has accepted it; the game
-    /// starts after its cloud saves are down (`app_state` & `APP_RUNNING`).
-    pub fn launch(&self, appid: u32, option: u32) -> Result<()> {
-        let call = self.ask(|reply| Command::Launch(appid, option, reply))?;
+    /// launch entry's key; `args` go on the game's command line after the
+    /// entry's own, as Steam adds them to join a friend's game. Returns
+    /// once the engine has accepted it; the game starts after its cloud
+    /// saves are down (`app_state` & `APP_RUNNING`).
+    pub fn launch(&self, appid: u32, option: u32, args: &str) -> Result<()> {
+        let args = args.to_owned();
+        let call = self.ask(|reply| Command::Launch(appid, option, args, reply))?;
         if call == 0 {
             bail!("the Steam engine refused to launch app {appid}");
         }
@@ -248,8 +252,11 @@ fn host(
 
 fn run_command(engine: &Engine, command: Command) {
     match command {
-        Command::Launch(appid, option, reply) => {
-            let _ = reply.send(engine.app_manager().map(|m| m.launch(appid, option)));
+        Command::Launch(appid, option, args, reply) => {
+            let launched = engine
+                .app_manager()
+                .and_then(|m| Ok(m.launch(appid, option, &CString::new(args)?)));
+            let _ = reply.send(launched);
         }
         Command::AppState(appid, reply) => {
             let _ = reply.send(engine.app_manager().map(|m| m.install_state(appid)));

@@ -41,6 +41,11 @@ impl Dirs {
         self.data.join("favorites.json")
     }
 
+    /// Friends marked as favorites in the UI.
+    pub fn favorite_friends_file(&self) -> PathBuf {
+        self.data.join("favorite_friends.json")
+    }
+
     /// The Steam engine fumes runs games with, per client build.
     pub fn engine(&self) -> PathBuf {
         self.data.join("engine")

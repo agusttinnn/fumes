@@ -516,9 +516,11 @@ pub struct AppManager(*mut c_void);
 impl AppManager {
     /// Launch like Steam's Play button: the engine syncs cloud saves, starts
     /// the game with Steam's environment, and tracks it. `option` is the key
-    /// of the app info launch entry. Returns the async call handle (0 if
-    /// the engine refused outright).
-    pub fn launch(&self, appid: u32, option: u32) -> u64 {
+    /// of the app info launch entry; `args` are the user's extra arguments
+    /// (`LaunchApp`'s last parameter, what `steam://rungameid/<id>//<args>`
+    /// fills in). Returns the async call handle (0 if the engine refused
+    /// outright).
+    pub fn launch(&self, appid: u32, option: u32, args: &CStr) -> u64 {
         // CGameID of a plain Steam app is just its id.
         let game_id: u64 = appid as u64;
         unsafe {
@@ -529,7 +531,7 @@ impl AppManager {
                 &game_id,
                 option,
                 LAUNCH_SOURCE_LIBRARY,
-                c"".as_ptr(),
+                args.as_ptr(),
             )
         }
     }

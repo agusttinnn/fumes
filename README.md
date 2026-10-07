@@ -25,7 +25,24 @@ Arrow keys move, → or Enter goes deeper or runs the action, ← goes back;
 `/` searches the library (every word has to be in the name; initials
 like "gta" work too), `f` stars a game as a favorite so it's listed first,
 `r` refreshes from Steam and Page Up/Down scroll. Actions run the same commands as below, with the terminal handed
-over until they finish. The friends list is sample data for now.
+over until they finish.
+
+Friends come from your Steam account, over a connection the UI keeps open
+(it shows you as online while it runs): who's online and what they're
+playing, and friend requests you've received (accept or decline) or sent
+(cancel). When a friend's game can be joined, **Join game** starts it
+with their session on the command line, the way Steam's "Join Game"
+does. Games run in the background: the UI stays up while you play (the
+bottom line shows what the game's session is doing, and a cloud-save
+conflict is asked about in the UI), so you can message friends and
+**Invite to your game**: fumes sends them your session (the game's
+`connect` rich presence, or its lobby) as Steam does. Invites friends send
+you get **Accept game invite**. fumes waits for a running game to close
+before it quits, so its saves upload. Pick a friend to see your recent messages with them and send new
+ones (text only). `/` and `f` search and favorite friends the same way
+as games; favorites are kept in `favorite_friends.json`. Other commands the
+UI runs (install, sign in) take the terminal, come back to the UI by
+themselves when they work, and wait for Enter when they don't.
 
 Running `install` again updates the game or repairs it, and only downloads
 what changed. `--verify` re-checks every file instead of trusting the last
@@ -58,8 +75,8 @@ official client instead.
   playtime. If local and cloud saves both changed, fumes asks which to
   keep. Ctrl-C reaches the game; fumes waits for it, and the upload,
   before signing out. Games the engine doesn't list as installed (Windows
-  builds under Wine, or any game on Linux/Windows for now), or launches
-  with extra arguments, are started directly, without cloud sync.
+  builds under Wine, or any game on Linux/Windows for now) are started
+  directly, without cloud sync.
 - **Games installed by the official client** still launch through
   `steam://` links. fumes reads those installs from Steam's
   `libraryfolders.vdf` and `appmanifest_*.acf` (`FUMES_STEAM_DIR` if Steam
