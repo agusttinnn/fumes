@@ -40,9 +40,16 @@ conflict is asked about in the UI), so you can message friends and
 you get **Accept game invite**. fumes waits for a running game to close
 before it quits, so its saves upload. Pick a friend to see your recent messages with them and send new
 ones (text only). `/` and `f` search and favorite friends the same way
-as games; favorites are kept in `favorite_friends.json`. Other commands the
-UI runs (install, sign in) take the terminal, come back to the UI by
-themselves when they work, and wait for Enter when they don't.
+as games; favorites are kept in `favorite_friends.json`.
+
+Installs, updates and verifies download in the background too: the UI
+stays usable, the bottom line shows how far along the download is, and
+the game is marked ↓ in the library. Downloads go one at a time; starting
+another queues it. **Stop download** stops one (or takes it out of the
+queue), and quitting mid-download asks first. Either way, starting it
+again picks up where it left off. Other commands the UI runs (sign in,
+uninstall) take the terminal, come back to the UI by themselves when they
+work, and wait for Enter when they don't.
 
 Running `install` again updates the game or repairs it, and only downloads
 what changed. `--verify` re-checks every file instead of trusting the last

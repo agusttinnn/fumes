@@ -238,7 +238,7 @@ async fn install(
     dir: Option<PathBuf>,
     verify: bool,
 ) -> Result<()> {
-    println!("Connecting to Steam…");
+    report(format_args!("Connecting to Steam…"));
     let connection = session::connect(dirs).await?;
     let owned = library::fetch_owned(&connection).await?;
     library::save_cache(&dirs.library_cache(), &owned)?;
@@ -272,19 +272,19 @@ async fn install(
     let install = download::install(&connection, game.appid, &opts).await?;
     installs::put(dirs, install.clone())?;
     if local::write_manifest(&install)?.is_none() {
-        eprintln!(
+        report_problem(format_args!(
             "note: {} isn't in a Steam library folder, so the Steam engine won't list it \
              as installed (games still run)",
             install.path.display()
-        );
+        ));
     }
-    println!(
+    report(format_args!(
         "Installed {} ({}, {}) in {}",
         install.name,
         install.os,
         download::human(install.size),
         install.path.display()
-    );
+    ));
     Ok(())
 }
 

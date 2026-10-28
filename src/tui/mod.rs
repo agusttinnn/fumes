@@ -6,18 +6,20 @@
 //! column; → or Enter goes a column deeper (or runs the action), ← or Esc
 //! comes back.
 //!
-//! Anything long or interactive (installing, signing in) runs as the
+//! Anything long or interactive (signing in, uninstalling) runs as the
 //! ordinary `fumes` command in a child process: the UI hands it the
 //! terminal and comes back when it's done, so progress output, prompts and
-//! Ctrl-C behave exactly as they do on the command line. Games are the
-//! exception: they run in the background (`game`) and the UI stays up, so
-//! friends can be messaged and invited while playing. Friends and messages
-//! go over a Steam connection the UI keeps open (`online`).
+//! Ctrl-C behave exactly as they do on the command line. Games and
+//! downloads are the exception: they run in the background (`game`) and
+//! the UI stays up, so friends can be messaged and invited while playing,
+//! and the library used while a game downloads. Downloads go one at a
+//! time, the rest waiting their turn. Friends and messages go over a Steam
+//! connection the UI keeps open (`online`).
 
 pub mod game;
 mod online;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::process::Command;
 use std::sync::mpsc;
@@ -102,6 +104,7 @@ enum Action {
     Install,
     Update,
     Verify,
+    StopDownload,
     CloudSync,
     Dlc,
     StorePage,
@@ -131,6 +134,7 @@ impl Action {
             Action::Install => "Install",
             Action::Update => "Update",
             Action::Verify => "Verify files",
+            Action::StopDownload => "Stop download",
             Action::CloudSync => "Cloud sync",
             Action::Dlc => "DLC ↗",
             Action::StorePage => "Store page ↗",
@@ -160,8 +164,13 @@ enum Job {
     Command(Pending),
     /// A game, run in the background (`fumes launch …`).
     Play(Launch),
+    /// An install, update or repair, downloaded in the background (`fumes
+    /// install …`) once the downloads before it are done.
+    Download(Launch),
     /// A web page or `steam://` link.
     Open(String),
+    /// Leave fumes, stopping a download that isn't done.
+    Quit,
 }
 
 /// A `fumes` command waiting for the terminal.
@@ -175,7 +184,7 @@ struct Pending {
     show_output: bool,
 }
 
-/// A game waiting to be started in the background.
+/// A game or a download waiting to be started in the background.
 #[derive(Debug)]
 struct Launch {
     appid: u32,
@@ -264,6 +273,9 @@ struct App {
     /// A game waiting to start, and the one running in the background.
     launch: Option<Launch>,
     running: Option<Running>,
+    /// The download in progress, and the ones waiting their turn.
+    download: Option<Running>,
+    queue: VecDeque<Launch>,
     /// The running game is asking which cloud saves to keep.
     conflict: bool,
     quit: bool,
@@ -304,6 +316,8 @@ impl App {
             pending: None,
             launch: None,
             running: None,
+            download: None,
+            queue: VecDeque::new(),
             conflict: false,
             quit: false,
             updates_tx,
@@ -319,6 +333,8 @@ impl App {
                 self.update(update);
             }
             self.watch_game();
+            self.watch_download();
+            self.next_download();
             self.sync();
             terminal.draw(|frame| self.draw(frame))?;
             if event::poll(Duration::from_millis(250))?
@@ -569,9 +585,69 @@ impl App {
         self.reload();
     }
 
+    /// Notice when the download in progress is over.
+    fn watch_download(&mut self) {
+        let Some(download) = &mut self.download else {
+            return;
+        };
+        download.poll();
+        let Some(status) = download.finished() else {
+            return;
+        };
+        download.drain();
+        let title = download.title.clone();
+        self.status = Some(match &download.error {
+            Some(error) => format!("{title}: {error}"),
+            None if !status.success() => format!("{title}: didn't finish ({status})."),
+            None => format!("{title}: done."),
+        });
+        self.download = None;
+        self.reload();
+    }
+
+    /// Start the first download waiting, once nothing else is downloading.
+    fn next_download(&mut self) {
+        if self.download.is_some() {
+            return;
+        }
+        let Some(next) = self.queue.pop_front() else {
+            return;
+        };
+        match Running::start(next.appid, next.title, &next.args) {
+            Ok(download) => self.download = Some(download),
+            Err(e) => self.status = Some(format!("{e:#}")),
+        }
+    }
+
+    /// Whether `appid` is downloading or waiting its turn to.
+    fn downloading(&self, appid: u32) -> bool {
+        self.download.as_ref().is_some_and(|d| d.appid == appid)
+            || self.queue.iter().any(|d| d.appid == appid)
+    }
+
+    fn stop_download(&mut self, appid: u32) {
+        if let Some(at) = self.queue.iter().position(|d| d.appid == appid) {
+            let title = self.queue.remove(at).map(|d| d.title).unwrap_or_default();
+            self.status = Some(format!("{title}: taken out of the queue."));
+        } else if let Some(mut download) = self.download.take_if(|d| d.appid == appid) {
+            download.stop();
+            self.status = Some(format!(
+                "{}: stopped. Starting it again picks up where it left off.",
+                download.title
+            ));
+        }
+    }
+
     fn start_game(&mut self, launch: Launch) {
         if let Some(running) = &self.running {
             self.status = Some(format!("{} is running; one game at a time.", running.title));
+            return;
+        }
+        if self.downloading(launch.appid) {
+            self.status = Some(format!(
+                "{} is downloading; it can be played once that's done.",
+                launch.title
+            ));
             return;
         }
         match Running::start(launch.appid, launch.title, &launch.args) {
@@ -581,14 +657,25 @@ impl App {
     }
 
     /// Quitting while a game runs would cut its session short (saves not
-    /// uploaded, the engine not signed out), so it waits for the game.
+    /// uploaded, the engine not signed out), so it waits for the game. A
+    /// download can be picked up again later, so that only asks first.
     fn try_quit(&mut self) {
-        match &self.running {
-            Some(game) => {
-                self.status = Some(format!(
-                    "{} is still running. Close it first, so its saves upload.",
-                    game.title
-                ))
+        if let Some(game) = &self.running {
+            self.status = Some(format!(
+                "{} is still running. Close it first, so its saves upload.",
+                game.title
+            ));
+            return;
+        }
+        match &self.download {
+            Some(download) => {
+                self.confirm = Some(Confirm {
+                    question: format!(
+                        "{} isn't done. Quit anyway? It picks up where it left off next time.",
+                        download.title
+                    ),
+                    job: Job::Quit,
+                })
             }
             None => self.quit = true,
         }
@@ -702,6 +789,9 @@ impl App {
                 } else {
                     Favorite
                 };
+                if self.downloading(game.appid) {
+                    return vec![StopDownload, Dlc, StorePage, favorite];
+                }
                 let running = self.running.as_ref().is_some_and(|g| g.appid == game.appid);
                 match &game.installed {
                     // Its files are in use.
@@ -1101,6 +1191,13 @@ impl App {
         };
         let fumes = |title, args: &[&str]| command(title, args, false);
         let report = |title, args: &[&str]| command(title, args, true);
+        let download = |title, args: &[&str]| {
+            Job::Download(Launch {
+                appid,
+                title,
+                args: args.iter().map(|a| a.to_string()).collect(),
+            })
+        };
         let job = match action {
             Action::Play => Job::Play(Launch {
                 appid,
@@ -1112,9 +1209,10 @@ impl App {
                 args: vec!["launch".into(), id.clone()],
             }),
             Action::PlayInSteam => Job::Open(format!("steam://rungameid/{appid}")),
-            Action::Install => fumes(format!("Installing {name}"), &["install", &id]),
-            Action::Update => fumes(format!("Updating {name}"), &["install", &id]),
-            Action::Verify => fumes(format!("Verifying {name}"), &["install", &id, "--verify"]),
+            Action::Install => download(format!("Installing {name}"), &["install", &id]),
+            Action::Update => download(format!("Updating {name}"), &["install", &id]),
+            Action::Verify => download(format!("Verifying {name}"), &["install", &id, "--verify"]),
+            Action::StopDownload => return self.stop_download(appid),
             Action::CloudSync => report(
                 format!("Syncing {name}'s cloud saves"),
                 &["engine", "cloud-info", &id, "--pull"],
@@ -1200,6 +1298,21 @@ impl App {
         match job {
             Job::Command(pending) => self.pending = Some(pending),
             Job::Play(launch) => self.launch = Some(launch),
+            Job::Download(download) => {
+                if self.download.is_some() {
+                    self.status = Some(format!(
+                        "{}: queued, it starts when the downloads before it are done.",
+                        download.title
+                    ));
+                }
+                self.queue.push_back(download);
+            }
+            Job::Quit => {
+                if let Some(download) = &mut self.download {
+                    download.stop();
+                }
+                self.quit = true;
+            }
             Job::Open(url) => {
                 self.status = Some(match crate::open_url(&url) {
                     Ok(()) if url.starts_with("steam://") => "Sent to Steam.".into(),
@@ -1347,7 +1460,11 @@ impl App {
             .iter()
             .map(|&i| {
                 let game = &self.games[i];
-                game_item(game, self.favorites.contains(&game.appid))
+                game_item(
+                    game,
+                    self.favorites.contains(&game.appid),
+                    self.downloading(game.appid),
+                )
             })
             .collect();
         let list = List::new(items).highlight_style(self.highlight(Focus::Items));
@@ -1556,6 +1673,19 @@ impl App {
                         ""
                     };
                     let mut details = game_details(game);
+                    if self.downloading(game.appid) {
+                        let state = match &self.download {
+                            Some(d) if d.appid == game.appid => d.state.clone(),
+                            _ => "Waiting for the downloads before it".into(),
+                        };
+                        details.splice(
+                            0..0,
+                            [
+                                Line::styled(format!("↓ {state}"), Style::new().fg(ACCENT)),
+                                Line::raw(""),
+                            ],
+                        );
+                    }
                     if let Some(running) = self.running.as_ref().filter(|g| g.appid == game.appid) {
                         details.splice(
                             0..0,
@@ -1735,18 +1865,31 @@ impl App {
                 Line::styled(format!(" {hints}"), Style::new().fg(DIM))
             }
         };
+        let mut spans = Vec::new();
         if let Some(game) = &self.running {
-            let mut spans = vec![
-                Span::styled(
-                    format!(" ▶ {}: {} ", game.title, game.state.trim_end_matches('.')),
-                    Style::new().fg(Color::Green),
-                ),
-                Span::styled("│", Style::new().fg(DIM)),
-            ];
-            spans.append(&mut line.spans);
-            line = Line::from(spans);
+            spans.push(Span::styled(
+                format!(" ▶ {}: {} ", game.title, game.state.trim_end_matches('.')),
+                Style::new().fg(Color::Green),
+            ));
+            spans.push(Span::styled("│", Style::new().fg(DIM)));
         }
-        frame.render_widget(Paragraph::new(line), area);
+        if let Some(download) = &self.download {
+            let queued = match self.queue.len() {
+                0 => String::new(),
+                n => format!("(+{n} queued) "),
+            };
+            spans.push(Span::styled(
+                format!(
+                    " ↓ {}: {} {queued}",
+                    download.title,
+                    download.state.trim_end_matches('.')
+                ),
+                Style::new().fg(ACCENT),
+            ));
+            spans.push(Span::styled("│", Style::new().fg(DIM)));
+        }
+        spans.append(&mut line.spans);
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 }
 
@@ -1813,8 +1956,9 @@ fn message_lines(message: &Message, name: &str) -> Vec<Line<'static>> {
     out
 }
 
-fn game_item(game: &Game, favorite: bool) -> ListItem<'static> {
+fn game_item(game: &Game, favorite: bool, downloading: bool) -> ListItem<'static> {
     let (mark, color) = match &game.installed {
+        _ if downloading => ("↓", ACCENT),
         Some(i) if i.by_fumes => ("●", Color::Green),
         Some(i) if i.complete => ("●", Color::Blue),
         Some(_) => ("◐", Color::Yellow),
@@ -2388,6 +2532,85 @@ mod tests {
         assert!(app.conflict);
         press(&mut app, KeyCode::Char('c'));
         assert!(!app.conflict);
+    }
+
+    #[test]
+    fn downloads_run_in_the_background_one_at_a_time() {
+        let mut app = app(vec![game(1, "Alpha", None), game(2, "Beta", Some(true))]);
+        // Library → Alpha → Install: queued, not with the terminal handed over.
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.pending.is_none());
+        let alpha = app.queue.pop_front().unwrap();
+        assert_eq!(alpha.args, ["install", "1"]);
+        app.download = Some(game::fake(
+            alpha.appid,
+            &alpha.title,
+            &["\u{1e}42% of 3.0 GiB, 12.0 MiB/s"],
+        ));
+        app.download.as_mut().unwrap().poll();
+        assert_eq!(
+            app.download.as_ref().unwrap().state,
+            "42% of 3.0 GiB, 12.0 MiB/s"
+        );
+        assert_eq!(
+            app.actions(),
+            [
+                Action::StopDownload,
+                Action::Dlc,
+                Action::StorePage,
+                Action::Favorite
+            ]
+        );
+
+        // Beta's update waits its turn, and can't be played meanwhile.
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.queue[0].args, ["install", "2"]);
+        assert!(app.status.as_deref().unwrap().contains("queued"));
+        app.next_download();
+        assert_eq!(app.queue.len(), 1);
+        assert_eq!(app.actions()[0], Action::StopDownload);
+        app.start_game(Launch {
+            appid: 2,
+            title: "Beta".into(),
+            args: vec!["launch".into(), "2".into()],
+        });
+        assert!(app.running.is_none());
+        assert!(app.status.as_deref().unwrap().contains("downloading"));
+
+        // Stopping a queued one takes it out of the queue.
+        press(&mut app, KeyCode::Home);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.queue.is_empty());
+        assert!(app.actions().contains(&Action::Play));
+
+        // Quitting mid-download asks first.
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.confirm.is_some() && !app.quit);
+        press(&mut app, KeyCode::Char('n'));
+        assert!(!app.quit);
+
+        // A download that's over says how it went.
+        app.download = Some(game::fake(
+            1,
+            "Installing Alpha",
+            &["Error: could not resume the session"],
+        ));
+        while app.download.is_some() {
+            app.watch_download();
+        }
+        assert_eq!(
+            app.status.as_deref(),
+            Some("Installing Alpha: could not resume the session")
+        );
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.quit);
     }
 
     #[test]

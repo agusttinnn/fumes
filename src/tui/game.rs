@@ -1,6 +1,7 @@
 //! A game running in the background while the UI stays up: `fumes launch`
 //! as a child process, its output read line by line, and its question
-//! about conflicting cloud saves answered from the UI.
+//! about conflicting cloud saves answered from the UI. Downloads
+//! (`fumes install`) run in the background the same way.
 //!
 //! The child knows it's run this way from `UI_ENV`. It marks its own
 //! progress lines (`report`) so they can be told apart from whatever the
@@ -170,6 +171,13 @@ impl Running {
             stdin.write_all(answer.as_bytes()).ok();
             stdin.flush().ok();
         }
+    }
+
+    /// End it now. An install stopped partway picks up where it left off
+    /// the next time.
+    pub fn stop(&mut self) {
+        self.child.kill().ok();
+        self.child.wait().ok();
     }
 
     /// `Some` once the session is over (the game closed and its saves went

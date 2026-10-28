@@ -22,6 +22,7 @@ use steam_vent::Connection;
 use crate::appinfo::{self, AppInfo, Depot};
 use crate::cdn::{self, Cdn, Chunk, DepotKey, FileEntry, Manifest, flags};
 use crate::installs::Install;
+use crate::tui::game::{self, report, report_problem};
 
 /// Bitness of the builds to fetch. Every platform fumes runs on is 64-bit.
 const ARCH: &str = "64";
@@ -51,16 +52,21 @@ pub async fn install(connection: &Connection, appid: u32, opts: &Options) -> Res
         bail!("{} has no downloadable {os} content", info.name);
     }
 
-    println!("Preparing {} ({os}, {} depots)…", info.name, depots.len());
+    report(format_args!(
+        "Preparing {} ({os}, {} depots)…",
+        info.name,
+        depots.len()
+    ));
     let cdn = Arc::new(Cdn::discover(connection, appid).await?);
     let mut manifests: Vec<(Manifest, DepotKey)> = Vec::new();
     for depot in &depots {
         match fetch_depot(connection, &cdn, &info, depot).await {
             Ok(m) => manifests.push(m),
             // A DLC depot Steam won't serve shouldn't sink the whole game.
-            Err(e) if depot.dlcappid.is_some() => {
-                eprintln!("warning: skipping DLC depot {}: {e:#}", depot.id)
-            }
+            Err(e) if depot.dlcappid.is_some() => report_problem(format_args!(
+                "warning: skipping DLC depot {}: {e:#}",
+                depot.id
+            )),
             Err(e) => return Err(e.context(format!("depot {}", depot.id))),
         }
     }
@@ -84,18 +90,19 @@ pub async fn install(connection: &Connection, appid: u32, opts: &Options) -> Res
             .map(|(n, f)| (n.clone(), f.sha.clone()))
             .collect()
     };
+    report(format_args!("Checking what's already on disk…"));
     let plan = tokio::task::spawn_blocking(move || plan(&dir, &files_for_plan, &keys, &prev_files))
         .await??;
 
     let needed: u64 = plan.jobs.iter().map(|j| j.chunk.size as u64).sum();
     if plan.jobs.is_empty() {
-        println!("All files are up to date.");
+        report(format_args!("All files are up to date."));
     } else {
-        println!(
+        report(format_args!(
             "Downloading {} ({} chunks)…",
             human(needed),
             plan.jobs.len()
-        );
+        ));
         download(cdn, plan.jobs, needed).await?;
     }
 
@@ -334,7 +341,9 @@ async fn download(cdn: Arc<Cdn>, jobs: Vec<Job>, total: u64) -> Result<()> {
         .try_collect::<()>()
         .await;
     progress.abort();
-    eprintln!();
+    if !game::from_ui() {
+        eprintln!();
+    }
     result
 }
 
@@ -359,9 +368,19 @@ async fn report_progress(done: Arc<AtomicU64>, total: u64) {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let bytes = done.load(Ordering::Relaxed);
         let rate = bytes as f64 / start.elapsed().as_secs_f64().max(0.001);
+        let percent = bytes as f64 * 100.0 / total.max(1) as f64;
+        // The UI shows the latest line as the download's state, so it
+        // gets whole lines rather than one redrawn in place.
+        if game::from_ui() {
+            report(format_args!(
+                "{percent:.0}% of {}, {}/s",
+                human(total),
+                human(rate as u64)
+            ));
+            continue;
+        }
         eprint!(
-            "\r  {:5.1}%  {} / {}  {}/s   ",
-            bytes as f64 * 100.0 / total.max(1) as f64,
+            "\r  {percent:5.1}%  {} / {}  {}/s   ",
             human(bytes),
             human(total),
             human(rate as u64)
