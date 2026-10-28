@@ -6,6 +6,30 @@ games straight from Steam's content servers and runs them with Valve's own
 Steam client engine, without Steam's UI, so games get the real Steamworks
 API: ownership, achievements, cloud saves, friends and multiplayer.
 
+## Download
+
+Prebuilt fumes, a single program with nothing to install alongside it:
+
+| Platform | Download |
+| --- | --- |
+| Windows (x86-64) | [fumes-windows-x86_64.zip](https://github.com/agusttinnn/fumes/releases/latest/download/fumes-windows-x86_64.zip) |
+| macOS (Apple Silicon) | [fumes-macos-arm64.tar.gz](https://github.com/agusttinnn/fumes/releases/latest/download/fumes-macos-arm64.tar.gz) |
+| macOS (Intel) | [fumes-macos-x86_64.tar.gz](https://github.com/agusttinnn/fumes/releases/latest/download/fumes-macos-x86_64.tar.gz) |
+| Linux (x86-64) | [fumes-linux-x86_64.tar.gz](https://github.com/agusttinnn/fumes/releases/latest/download/fumes-linux-x86_64.tar.gz) |
+
+Older versions are on the [releases page](https://github.com/agusttinnn/fumes/releases).
+Unpack it and run `fumes` (or `fumes.exe`) from a terminal; with no command
+it opens the terminal UI. The builds aren't signed, so macOS blocks a
+downloaded one until you clear the quarantine flag
+(`xattr -d com.apple.quarantine fumes`), and Windows SmartScreen may ask
+you to confirm the first run.
+
+To build it yourself, use `cargo build --release`, or `cargo run --` in
+place of `fumes` in the commands below. Pushing a `v*` tag builds and
+publishes a new release (`.github/workflows/release.yml`).
+
+## Usage
+
 ```bash
 cargo run -- login                     # account name, password, then Steam Guard (code or app approval)
 cargo run -- library                   # everything you own; "fumes"/"steam" marks what's installed
