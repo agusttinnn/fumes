@@ -109,7 +109,8 @@ jobs:
             gh api -X PATCH "repos/$GH_REPO/git/refs/tags/continuous" \
               -f sha="$GITHUB_SHA" -F force=true > /dev/null
             gh release upload continuous fumes-* --clobber
-            gh release edit continuous --notes "$notes"
+            # The tag moved above; this is the commit the release page shows.
+            gh release edit continuous --target "$GITHUB_SHA" --notes "$notes"
           else
             gh release create continuous fumes-* --target "$GITHUB_SHA" \
               --title "Latest build from main" --notes "$notes" --prerelease
