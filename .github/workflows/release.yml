@@ -97,23 +97,18 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "fumes $GITHUB_REF_NAME" \
             --generate-notes --latest=false
-      # Marked Latest every time, so /releases/latest is always the newest
-      # build of main (a version doesn't take that over).
+      # Published afresh every time, so the releases page dates it by this
+      # build, and marked Latest, so /releases/latest is always the newest
+      # build of main (a version doesn't take that over). Its links are
+      # down for the few seconds between delete and create.
       - name: Replace the continuous build
         if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          short="${GITHUB_SHA::7}"
           notes="Built from $GITHUB_SHA, the latest commit on main. It's replaced on every push."
-          if gh release view continuous > /dev/null 2>&1; then
-            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/continuous" \
-              -f sha="$GITHUB_SHA" -F force=true > /dev/null
-            gh release upload continuous fumes-* --clobber
-            # The tag moved above; this is the commit the release page shows.
-            gh release edit continuous --target "$GITHUB_SHA" --notes "$notes" \
-              --prerelease=false --latest
-          else
-            gh release create continuous fumes-* --target "$GITHUB_SHA" \
-              --title "Latest build from main" --notes "$notes" --latest
-          fi
+          gh release delete continuous --yes --cleanup-tag 2>/dev/null || true
+          gh release create continuous fumes-* --target "$GITHUB_SHA" \
+            --title "Latest build from main ($short)" --notes "$notes" --latest
