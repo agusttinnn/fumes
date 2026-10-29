@@ -12,6 +12,7 @@ mod cdn;
 mod dirs;
 mod download;
 mod favorites;
+mod firstrun;
 mod friends;
 mod installs;
 mod kv;
@@ -111,6 +112,10 @@ enum Cmd {
         #[command(subcommand)]
         action: EngineCmd,
     },
+    /// First-time setup steps that need administrator rights, run by an
+    /// elevated copy of fumes (see firstrun.rs).
+    #[command(hide = true)]
+    FirstRun { steps: String },
 }
 
 #[derive(Subcommand)]
@@ -230,6 +235,10 @@ async fn main() -> Result<()> {
             open_steam_url(&format!("steam://rungameid/{}", game.appid))
         }
         Cmd::Sync { game } => sync(&dirs, &game).await,
+        #[cfg(windows)]
+        Cmd::FirstRun { steps } => std::process::exit(firstrun::elevated(&steps)),
+        #[cfg(not(windows))]
+        Cmd::FirstRun { .. } => bail!("first-time setup only runs on Windows"),
         Cmd::Engine { action } => engine(&dirs, action).await,
     }
 }
@@ -311,6 +320,7 @@ async fn install(
         os,
         language,
         dir,
+        common: dirs.library().join("steamapps/common"),
         verify,
     };
     let install = download::install(&connection, game.appid, &opts).await?;
@@ -337,6 +347,13 @@ async fn play(dirs: &Dirs, install: &Install, option: usize, args: &[String]) ->
     let native = install.os == download::host_os();
     let command = run::command(install, option, args)?;
     let key = run::launch_key(install, option)?;
+
+    // What Steam calls first-time setup: the runtimes (DirectX, Visual
+    // C++…), registry values and default files the game needs.
+    #[cfg(windows)]
+    if install.os == "windows" {
+        tokio::task::block_in_place(|| firstrun::prepare(install));
+    }
 
     let runtime = engine_runtime(dirs).await?;
     if !steam::register::ready()? {

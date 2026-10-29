@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::appinfo::Launch;
 use crate::dirs::Dirs;
+use crate::firstrun::Script;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Install {
@@ -25,6 +26,11 @@ pub struct Install {
     pub depots: BTreeMap<u32, u64>,
     pub size: u64,
     pub launch: Vec<Launch>,
+    /// Install scripts to run before it's played on Windows: those of the
+    /// shared redistributables it uses, then its own. `None` for installs
+    /// from before fumes kept them.
+    #[serde(default)]
+    pub setup: Option<Vec<Script>>,
 }
 
 pub type Installs = BTreeMap<u32, Install>;

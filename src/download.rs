@@ -6,6 +6,7 @@
 //! against the manifest's hashes, so the same code installs, resumes an
 //! interrupted install, repairs, and updates.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -21,6 +22,7 @@ use steam_vent::Connection;
 
 use crate::appinfo::{self, AppInfo, Depot};
 use crate::cdn::{self, Cdn, Chunk, DepotKey, FileEntry, Manifest, flags};
+use crate::firstrun::{self, Script};
 use crate::installs::Install;
 use crate::tui::game::{self, report, report_problem};
 
@@ -34,11 +36,24 @@ pub struct Options {
     pub os: Option<String>,
     pub language: String,
     pub dir: PathBuf,
+    /// The library's `steamapps/common`, where shared runtimes go (in
+    /// "Steamworks Shared", as Steam puts them).
+    pub common: PathBuf,
     /// Re-hash every file instead of trusting the last install's record.
     pub verify: bool,
 }
 
-/// Download (or update, or repair) a game into `opts.dir`.
+/// Where a folder keeps its record of the files installed in it.
+const STATE: &str = ".fumes/state.json";
+
+/// A folder an install writes to: the game's, or the shared runtimes'.
+struct Folder {
+    dir: PathBuf,
+    manifests: Vec<(Manifest, DepotKey)>,
+}
+
+/// Download (or update, or repair) a game into `opts.dir`, with the shared
+/// runtimes a Windows game needs on Windows.
 pub async fn install(connection: &Connection, appid: u32, opts: &Options) -> Result<Install> {
     if !appinfo::owns(connection, appid).await? {
         bail!("this account doesn't own app {appid}");
@@ -51,11 +66,22 @@ pub async fn install(connection: &Connection, appid: u32, opts: &Options) -> Res
     if depots.is_empty() {
         bail!("{} has no downloadable {os} content", info.name);
     }
+    // They're installed before the first launch (firstrun.rs), which only
+    // happens on Windows.
+    let shared = if os == "windows" && host_os() == "windows" {
+        select_shared(&info.depots, &os, &opts.language)
+    } else {
+        Vec::new()
+    };
 
     report(format_args!(
-        "Preparing {} ({os}, {} depots)…",
+        "Preparing {} ({os}, {} depots{})…",
         info.name,
-        depots.len()
+        depots.len(),
+        match shared.len() {
+            0 => String::new(),
+            n => format!(", {n} shared runtimes"),
+        }
     ));
     let cdn = Arc::new(Cdn::discover(connection, appid).await?);
     let mut manifests: Vec<(Manifest, DepotKey)> = Vec::new();
@@ -70,56 +96,74 @@ pub async fn install(connection: &Connection, appid: u32, opts: &Options) -> Res
             Err(e) => return Err(e.context(format!("depot {}", depot.id))),
         }
     }
+    let mut folders = vec![Folder {
+        dir: opts.dir.clone(),
+        manifests,
+    }];
+    folders.extend(fetch_shared(connection, &cdn, &shared, &opts.common).await);
 
-    fs::create_dir_all(&opts.dir).with_context(|| format!("creating {}", opts.dir.display()))?;
-    let state_path = opts.dir.join(".fumes/state.json");
-    let previous = State::load(&state_path);
-
-    let files = merge(&manifests);
-    let size: u64 = files.values().map(|(f, _)| f.size).sum();
-
-    let keys: HashMap<u32, DepotKey> = manifests.iter().map(|(m, k)| (m.depot, *k)).collect();
-    let dir = opts.dir.clone();
-    let files_for_plan = files.clone();
-    let prev_files: BTreeMap<String, String> = if opts.verify {
-        BTreeMap::new()
-    } else {
-        previous
-            .files
-            .iter()
-            .map(|(n, f)| (n.clone(), f.sha.clone()))
-            .collect()
-    };
     report(format_args!("Checking what's already on disk…"));
-    let plan = tokio::task::spawn_blocking(move || plan(&dir, &files_for_plan, &keys, &prev_files))
-        .await??;
+    let mut jobs = Vec::new();
+    let mut planned: Vec<(Files, State)> = Vec::new();
+    for folder in &folders {
+        let dir = folder.dir.clone();
+        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let previous = State::load(&dir.join(STATE));
+        let files = merge(&folder.manifests);
+        let keys: HashMap<u32, DepotKey> = folder
+            .manifests
+            .iter()
+            .map(|(m, k)| (m.depot, *k))
+            .collect();
+        let prev_files: BTreeMap<String, String> = if opts.verify {
+            BTreeMap::new()
+        } else {
+            previous
+                .files
+                .iter()
+                .map(|(n, f)| (n.clone(), f.sha.clone()))
+                .collect()
+        };
+        let files_for_plan = files.clone();
+        let plan =
+            tokio::task::spawn_blocking(move || plan(&dir, &files_for_plan, &keys, &prev_files))
+                .await??;
+        jobs.extend(plan.jobs);
+        planned.push((files, previous));
+    }
 
-    let needed: u64 = plan.jobs.iter().map(|j| j.chunk.size as u64).sum();
-    if plan.jobs.is_empty() {
+    let needed: u64 = jobs.iter().map(|j| j.chunk.size as u64).sum();
+    if jobs.is_empty() {
         report(format_args!("All files are up to date."));
     } else {
         report(format_args!(
             "Downloading {} ({} chunks)…",
             human(needed),
-            plan.jobs.len()
+            jobs.len()
         ));
-        download(cdn, plan.jobs, needed).await?;
+        download(cdn, jobs, needed).await?;
     }
 
-    finish(&opts.dir, &files, &previous)?;
-    let state = State {
-        files: files
-            .iter()
-            .map(|(name, (f, depot))| {
-                let entry = FileState {
-                    sha: hex::encode(&f.sha),
-                    depot: *depot,
-                };
-                (name.clone(), entry)
-            })
-            .collect(),
-    };
-    state.save(&state_path)?;
+    for (folder, (files, previous)) in folders.iter().zip(&planned) {
+        finish(&folder.dir, files, previous)?;
+        record(files, previous).save(&folder.dir.join(STATE))?;
+    }
+
+    // The shared runtimes' scripts first, as Steam runs them.
+    let mut setup = Vec::new();
+    for (folder, (files, _)) in folders.iter().zip(&planned).skip(1) {
+        setup.extend(install_scripts(files).map(|name| Script {
+            path: folder.dir.join(name),
+            installdir: folder.dir.clone(),
+            label: firstrun::redist_label(name),
+        }));
+    }
+    let game_files = &planned[0].0;
+    setup.extend(install_scripts(game_files).map(|name| Script {
+        path: opts.dir.join(name),
+        installdir: opts.dir.clone(),
+        label: info.name.clone(),
+    }));
 
     Ok(Install {
         appid,
@@ -129,9 +173,100 @@ pub async fn install(connection: &Connection, appid: u32, opts: &Options) -> Res
         arch: ARCH.into(),
         language: opts.language.clone(),
         buildid: info.buildid,
-        depots: manifests.iter().map(|(m, _)| (m.depot, m.gid)).collect(),
-        size,
+        depots: folders[0]
+            .manifests
+            .iter()
+            .map(|(m, _)| (m.depot, m.gid))
+            .collect(),
+        size: game_files.values().map(|(f, _)| f.size).sum(),
         launch: info.launch.clone(),
+        setup: Some(setup),
+    })
+}
+
+/// The shared depots' manifests, in a folder per app they come from
+/// (Steamworks Common Redistributables, "Steamworks Shared"). One Steam
+/// won't serve is skipped: the game may not need it.
+async fn fetch_shared(
+    connection: &Connection,
+    cdn: &Cdn,
+    shared: &[&Depot],
+    common: &Path,
+) -> Vec<Folder> {
+    let mut apps: HashMap<u32, AppInfo> = HashMap::new();
+    let mut folders: Vec<Folder> = Vec::new();
+    for depot in shared {
+        match fetch_shared_depot(connection, cdn, &mut apps, depot).await {
+            Ok((installdir, manifest)) => {
+                let dir = common.join(installdir);
+                match folders.iter_mut().find(|f| f.dir == dir) {
+                    Some(folder) => folder.manifests.push(manifest),
+                    None => folders.push(Folder {
+                        dir,
+                        manifests: vec![manifest],
+                    }),
+                }
+            }
+            Err(e) => report_problem(format_args!(
+                "warning: skipping shared runtime depot {}: {e:#}",
+                depot.id
+            )),
+        }
+    }
+    folders
+}
+
+async fn fetch_shared_depot(
+    connection: &Connection,
+    cdn: &Cdn,
+    apps: &mut HashMap<u32, AppInfo>,
+    depot: &Depot,
+) -> Result<(String, (Manifest, DepotKey))> {
+    let from = depot.depotfromapp.context("no app to get it from")?;
+    let app = match apps.entry(from) {
+        Entry::Occupied(known) => known.into_mut(),
+        Entry::Vacant(new) => new.insert(appinfo::fetch(connection, from).await?),
+    };
+    let source = app
+        .depots
+        .iter()
+        .find(|d| d.id == depot.id)
+        .with_context(|| format!("app {from} doesn't list it"))?;
+    let manifest = fetch_depot(connection, cdn, app, source).await?;
+    Ok((app.installdir.clone(), manifest))
+}
+
+/// What a folder's state should say now: this run's files, plus the
+/// earlier record of depots it didn't fetch (a skipped DLC, or in
+/// Steamworks Shared the runtimes of other games).
+fn record(files: &Files, previous: &State) -> State {
+    let fetched: std::collections::HashSet<u32> = files.values().map(|(_, d)| *d).collect();
+    let mut state = State {
+        files: previous
+            .files
+            .iter()
+            .filter(|(_, f)| !fetched.contains(&f.depot))
+            .map(|(n, f)| (n.clone(), f.clone()))
+            .collect(),
+    };
+    state.files.extend(files.iter().map(|(name, (f, depot))| {
+        let entry = FileState {
+            sha: hex::encode(&f.sha),
+            depot: *depot,
+        };
+        (name.clone(), entry)
+    }));
+    state
+}
+
+/// Install scripts among a folder's files: flagged as such in the
+/// manifest, or `installscript.vdf` at the top, where Steam also looks
+/// (Skyrim's isn't flagged).
+fn install_scripts(files: &Files) -> impl Iterator<Item = &String> {
+    files.iter().filter_map(|(name, (file, _))| {
+        let script = file.flags & flags::INSTALL_SCRIPT != 0
+            || name.eq_ignore_ascii_case("installscript.vdf");
+        script.then_some(name)
     })
 }
 
@@ -196,6 +331,21 @@ pub fn select_depots<'a>(
     candidates
         .into_iter()
         .filter(|d| !has_ours || d.osarch.as_deref().is_none_or(|a| a == arch))
+        .collect()
+}
+
+/// The shared runtimes (DirectX, Visual C++…) the game asks Steam to
+/// install alongside it, from another app's depots.
+pub fn select_shared<'a>(depots: &'a [Depot], os: &str, language: &str) -> Vec<&'a Depot> {
+    depots
+        .iter()
+        .filter(|d| d.sharedinstall && d.depotfromapp.is_some())
+        .filter(|d| d.oslist.is_empty() || d.oslist.iter().any(|o| o == os))
+        .filter(|d| {
+            d.language
+                .as_deref()
+                .is_none_or(|l| l.eq_ignore_ascii_case(language))
+        })
         .collect()
 }
 
@@ -611,6 +761,77 @@ mod tests {
         assert_eq!(
             ids(&select_depots(&all, "windows", "64", "english", &[])),
             [1, 2]
+        );
+    }
+
+    #[test]
+    fn selects_shared_runtimes_for_the_platform() {
+        let shared = |id: u32, os: &str| {
+            let mut d = depot(id);
+            d.manifest = None;
+            d.depotfromapp = Some(228980);
+            d.sharedinstall = true;
+            d.oslist = vec![os.into()];
+            d
+        };
+        let all = [
+            depot(1),
+            shared(228986, "windows"),
+            shared(228990, "windows"),
+            shared(9, "linux"),
+        ];
+        assert_eq!(
+            ids(&select_shared(&all, "windows", "english")),
+            [228986, 228990]
+        );
+        // Never among the game's own.
+        assert_eq!(
+            ids(&select_depots(&all, "windows", "64", "english", &[])),
+            [1]
+        );
+    }
+
+    #[test]
+    fn keeps_the_record_of_depots_not_fetched_this_time() {
+        let old = |depot| FileState {
+            sha: "old".into(),
+            depot,
+        };
+        let previous = State {
+            files: BTreeMap::from([
+                ("dx/DXSETUP.exe".into(), old(228990)),
+                ("vc/old.exe".into(), old(228986)),
+            ]),
+        };
+        let mut files = Files::new();
+        files.insert("vc/new.exe".into(), (entry("vc/new.exe", b"x", 10), 228986));
+        let state = record(&files, &previous);
+        let names: Vec<&str> = state.files.keys().map(String::as_str).collect();
+        // Another game's DirectX stays; this depot's old file goes.
+        assert_eq!(names, ["dx/DXSETUP.exe", "vc/new.exe"]);
+    }
+
+    #[test]
+    fn finds_install_scripts() {
+        let mut files = Files::new();
+        let mut flagged = entry("_CommonRedist/DirectX/Jun2010/installscript.vdf", b"x", 10);
+        flagged.flags = flags::INSTALL_SCRIPT;
+        files.insert(flagged.name.clone(), (flagged, 1));
+        files.insert(
+            "InstallScript.vdf".into(),
+            (entry("InstallScript.vdf", b"x", 10), 1),
+        );
+        files.insert(
+            "data/installscript.vdf".into(),
+            (entry("data/installscript.vdf", b"x", 10), 1),
+        );
+        let found: Vec<&String> = install_scripts(&files).collect();
+        assert_eq!(
+            found,
+            [
+                "InstallScript.vdf",
+                "_CommonRedist/DirectX/Jun2010/installscript.vdf"
+            ]
         );
     }
 

@@ -365,6 +365,7 @@ mod tests {
             depots: std::collections::BTreeMap::from([(481, 111), (482, 222)]),
             size: 2048,
             launch: vec![],
+            setup: None,
         }
     }
 
