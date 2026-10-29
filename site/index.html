@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>fumes — a lightweight Steam client for the terminal</title>
+<meta name="description" content="fumes is a small Steam client written in Rust. Install, update and play your Steam games from the terminal, without the Steam UI, with cloud saves, achievements and friends still working.">
+<link rel="canonical" href="https://agusttinnn.github.io/fumes/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="fumes — a lightweight Steam client for the terminal">
+<meta property="og:description" content="Install and play your Steam games from the terminal, without the Steam UI. Written in Rust.">
+<meta property="og:url" content="https://agusttinnn.github.io/fumes/">
+<meta name="twitter:card" content="summary">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "fumes",
+  "description": "A lightweight Steam client for the terminal, written in Rust. Downloads games from Steam's content servers and runs them with Valve's Steam client engine, without Steam's UI.",
+  "applicationCategory": "GameApplication",
+  "operatingSystem": "Windows, macOS, Linux",
+  "url": "https://agusttinnn.github.io/fumes/",
+  "downloadUrl": "https://github.com/agusttinnn/fumes/releases",
+  "codeRepository": "https://github.com/agusttinnn/fumes",
+  "programmingLanguage": "Rust",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
+<style>
+  /* The olive-and-gold look of early-2000s Steam and Half-Life menus:
+     flat olive panels with 1px bevels, light text, gold for anything active. */
+  :root {
+    --desk: #2b3125;
+    --olive: #4c5844;
+    --olive-dark: #3e4637;
+    --olive-deep: #343b2e;
+    --hi: #8c9284;
+    --lo: #282e22;
+    --text: #dedfd6;
+    --muted: #a0aa95;
+    --gold: #c4b550;
+    --select: #958831;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--desk); }
+  body {
+    margin: 0;
+    background: var(--desk);
+    color: var(--text);
+    font: 14px/1.55 Tahoma, Verdana, "DejaVu Sans", sans-serif;
+  }
+  ::selection { background: var(--select); color: #fff; }
+
+  .window {
+    max-width: 780px;
+    margin: 32px auto;
+    background: var(--olive);
+    border: 1px solid;
+    border-color: var(--hi) var(--lo) var(--lo) var(--hi);
+    box-shadow: 0 0 0 1px #1c2018, 0 12px 40px rgba(0, 0, 0, 0.45);
+  }
+  .titlebar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px 6px 12px;
+    color: var(--text);
+    font-weight: bold;
+    letter-spacing: 0.02em;
+  }
+  .titlebar .controls { display: flex; gap: 3px; }
+  .titlebar .controls i {
+    display: inline-grid;
+    place-items: center;
+    width: 16px;
+    height: 14px;
+    font: bold 10px/1 Tahoma, Verdana, sans-serif;
+    font-style: normal;
+    color: var(--text);
+    background: var(--olive);
+    border: 1px solid;
+    border-color: var(--hi) var(--lo) var(--lo) var(--hi);
+  }
+  .content { padding: 8px 20px 24px; }
+
+  h1 {
+    font: bold 26px/1.2 Verdana, Tahoma, sans-serif;
+    color: var(--gold);
+    margin: 12px 0 10px;
+  }
+  .lede { color: var(--text); margin: 0 0 20px; }
+  a { color: var(--gold); }
+  a:hover { color: #fff; }
+  strong { color: var(--gold); font-weight: bold; }
+
+  /* Group boxes: an etched frame with the heading sitting on its top edge. */
+  .group {
+    position: relative;
+    margin: 30px 0 0;
+    padding: 18px 16px 12px;
+    border: 1px solid var(--lo);
+    box-shadow: 1px 1px 0 var(--hi), inset 1px 1px 0 var(--hi);
+  }
+  .group h2 {
+    position: absolute;
+    top: -0.8em;
+    left: 10px;
+    margin: 0;
+    padding: 0 6px;
+    background: var(--olive);
+    color: var(--gold);
+    font: bold 13px/1.6 Tahoma, Verdana, sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .group > :first-of-type:not(h2) { margin-top: 0; }
+  .group p:last-child, .group ul:last-child { margin-bottom: 0; }
+  ul { padding-left: 18px; margin: 0 0 12px; }
+  li { margin: 4px 0; }
+  li::marker { color: var(--gold); }
+  .note { color: var(--muted); font-size: 13px; }
+
+  .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+  .btn {
+    display: inline-block;
+    min-width: 120px;
+    padding: 5px 16px;
+    text-align: center;
+    text-decoration: none;
+    color: var(--text);
+    background: var(--olive);
+    border: 1px solid;
+    border-color: var(--hi) var(--lo) var(--lo) var(--hi);
+  }
+  .btn:hover { color: var(--gold); }
+  .btn:active { border-color: var(--lo) var(--hi) var(--hi) var(--lo); }
+  .btn.default { box-shadow: 0 0 0 1px #000; }
+  .btn:focus-visible, a:focus-visible { outline: 1px dotted var(--gold); outline-offset: 2px; }
+
+  /* Sunken fields: list views and code. */
+  .sunken {
+    background: var(--olive-dark);
+    border: 1px solid;
+    border-color: var(--lo) var(--hi) var(--hi) var(--lo);
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left;
+    padding: 4px 8px;
+    color: var(--text);
+    font-weight: normal;
+    background: var(--olive);
+    border: 1px solid;
+    border-color: var(--hi) var(--lo) var(--lo) var(--hi);
+  }
+  td { padding: 5px 8px; }
+  td a { overflow-wrap: anywhere; }
+  tbody tr:hover { background: var(--select); }
+  tbody tr:hover a { color: #fff; }
+
+  code, pre { font-family: "Lucida Console", "Courier New", ui-monospace, monospace; font-size: 13px; }
+  code { color: var(--gold); }
+  pre {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    line-height: 1.5;
+    color: var(--text);
+  }
+  pre code { color: inherit; }
+  pre .c { color: var(--muted); }
+
+  ::-webkit-scrollbar { width: 16px; height: 16px; }
+  ::-webkit-scrollbar-track { background: var(--olive-deep); }
+  ::-webkit-scrollbar-thumb {
+    background: var(--olive);
+    border: 1px solid;
+    border-color: var(--hi) var(--lo) var(--lo) var(--hi);
+  }
+
+  .statusbar {
+    margin: 0 4px 4px;
+    padding: 4px 8px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  @media (max-width: 600px) {
+    .window { margin: 0; border-left: 0; border-right: 0; }
+    .content { padding: 8px 16px 20px; }
+    h1 { font-size: 21px; }
+    .group { padding: 18px 12px 12px; }
+    .btn { flex: 1 1 auto; }
+  }
+</style>
+</head>
+<body>
+<div class="window">
+  <div class="titlebar">
+    <span>fumes</span>
+    <span class="controls" aria-hidden="true"><i>_</i><i>×</i></span>
+  </div>
+  <main class="content">
+    <h1>fumes — a lightweight Steam client for the terminal</h1>
+    <p class="lede">Install, update and play your Steam games without the Steam UI.
+    fumes downloads games straight from Steam's content servers and runs them with
+    Valve's own Steam client engine, so games still get the real Steamworks API:
+    ownership, achievements, cloud saves, friends and multiplayer.</p>
+
+    <div class="buttons">
+      <a class="btn default" href="#download">Download</a>
+      <a class="btn" href="https://github.com/agusttinnn/fumes">Source on GitHub</a>
+    </div>
+
+    <section class="group">
+      <h2>What it does</h2>
+      <ul>
+        <li><strong>Your whole Steam library</strong> in a terminal UI: search, favorites, install, update, verify and uninstall.</li>
+        <li><strong>Resumable downloads</strong> that only fetch what changed, using the same protocol as the Steam client.</li>
+        <li><strong>Steam Cloud saves</strong> come down before you play and go up after, with a prompt when local and cloud saves conflict.</li>
+        <li><strong>Friends and chat</strong>: see who's online and what they're playing, send messages, join friends' games and send invites.</li>
+        <li><strong>Small footprint</strong>: one program, plus only the Steam engine (about 100 MB on macOS instead of ~400 MB for the full client).</li>
+        <li><strong>Works alongside Steam</strong>: games installed by the official client are listed and launch too.</li>
+      </ul>
+    </section>
+
+    <section class="group" id="download">
+      <h2>Download</h2>
+      <p>A single program with nothing to install alongside it, built from the latest commit:</p>
+      <div class="sunken">
+        <table>
+          <thead><tr><th>Platform</th><th>File</th></tr></thead>
+          <tbody>
+            <tr><td>Windows (x86-64)</td><td><a href="https://github.com/agusttinnn/fumes/releases/download/continuous/fumes-windows-x86_64.zip">fumes-windows-x86_64.zip</a></td></tr>
+            <tr><td>macOS (Apple Silicon)</td><td><a href="https://github.com/agusttinnn/fumes/releases/download/continuous/fumes-macos-arm64.tar.gz">fumes-macos-arm64.tar.gz</a></td></tr>
+            <tr><td>macOS (Intel)</td><td><a href="https://github.com/agusttinnn/fumes/releases/download/continuous/fumes-macos-x86_64.tar.gz">fumes-macos-x86_64.tar.gz</a></td></tr>
+            <tr><td>Linux (x86-64)</td><td><a href="https://github.com/agusttinnn/fumes/releases/download/continuous/fumes-linux-x86_64.tar.gz">fumes-linux-x86_64.tar.gz</a></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">Numbered versions are on the <a href="https://github.com/agusttinnn/fumes/releases">releases page</a>.
+      The builds aren't signed: on macOS clear the quarantine flag with
+      <code>xattr -d com.apple.quarantine fumes</code>, and on Windows SmartScreen may ask you to confirm the first run.</p>
+    </section>
+
+    <section class="group">
+      <h2>Getting started</h2>
+      <p>Run <code>fumes</code> with no command to open the terminal UI, or use the commands directly:</p>
+<pre class="sunken"><code>fumes login                    <span class="c"># account name, password, then Steam Guard</span>
+fumes library                  <span class="c"># everything you own</span>
+fumes install "san andreas"    <span class="c"># by app id, exact name, or part of the name</span>
+fumes engine setup             <span class="c"># macOS, once: lets games find the engine</span>
+fumes launch "san andreas"
+fumes sync "san andreas"       <span class="c"># pull Steam Cloud saves without playing</span></code></pre>
+      <p>Your password never touches disk: only Steam's refresh token is kept, readable by your user alone.</p>
+    </section>
+
+    <section class="group">
+      <h2>Status</h2>
+      <p>fumes is young. Cloud sync on launch currently works on macOS only, Linux and Windows haven't been tested at
+      runtime yet, and beta branches aren't supported. See the
+      <a href="https://github.com/agusttinnn/fumes#limits">full list of limits</a>.</p>
+      <p class="note">Third-party clients are a grey area under the Steam Subscriber Agreement. fumes only downloads
+      games your account owns, and downloads Valve's engine from Valve's servers rather than redistributing it.</p>
+    </section>
+  </main>
+  <footer class="statusbar sunken">
+    fumes is not affiliated with Valve. Steam is a trademark of Valve Corporation.
+    · <a href="https://github.com/agusttinnn/fumes">GitHub</a>
+  </footer>
+</div>
+</body>
+</html>
