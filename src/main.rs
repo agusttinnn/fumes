@@ -360,7 +360,7 @@ async fn play(dirs: &Dirs, install: &Install, option: usize, args: &[String]) ->
         bail!("games can't find the Steam engine yet; run `fumes engine setup` once");
     }
     // So the engine lists fumes' games as installed.
-    if let Some(root) = steam::data_dir() {
+    if let Some(root) = steam::data_dir(&runtime) {
         local::add_library_folder(&root, &dirs.library())?;
     }
     let (account, token) = session::credentials(dirs)?;
@@ -373,7 +373,7 @@ async fn play(dirs: &Dirs, install: &Install, option: usize, args: &[String]) ->
     // starts it directly, without cloud sync.
     let installed = block(|| client.app_state(install.appid))? & APP_FULLY_INSTALLED != 0;
     let result = if native && installed {
-        play_through_engine(&client, install, key, &args.join(" ")).await
+        play_through_engine(&client, &runtime, install, key, &args.join(" ")).await
     } else {
         let why = if !native {
             format!("it's a {} build running through Wine", install.os)
@@ -393,6 +393,7 @@ async fn play(dirs: &Dirs, install: &Install, option: usize, args: &[String]) ->
 /// `args` go on the game's command line after its launch entry's own.
 async fn play_through_engine(
     client: &steam::Client,
+    runtime: &Path,
     install: &Install,
     key: u32,
     args: &str,
@@ -415,10 +416,15 @@ async fn play_through_engine(
     let started = std::time::Instant::now();
     while block(|| client.app_state(appid))? & APP_RUNNING == 0 {
         if started.elapsed() > std::time::Duration::from_secs(60) {
-            bail!(
-                "the Steam engine didn't start {name}; its reason is in \
-                 ~/Library/Application Support/Steam/logs/content_log.txt"
-            );
+            let log = steam::data_dir(runtime)
+                .map(|dir| {
+                    format!(
+                        "; its reason is in {}",
+                        dir.join("logs/content_log.txt").display()
+                    )
+                })
+                .unwrap_or_default();
+            bail!("the Steam engine didn't start {name}{log}");
         }
         tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
@@ -611,6 +617,10 @@ async fn engine(dirs: &Dirs, action: EngineCmd) -> Result<()> {
             let lib = lib.map(std::path::absolute).transpose()?;
             let runtime = engine_runtime(dirs).await?;
             steam::register::status()?;
+            // As `launch` does, so the engine sees what it would there.
+            if let Some(root) = steam::data_dir(&runtime) {
+                local::add_library_folder(&root, &dirs.library())?;
+            }
             let client = start_engine(&runtime, Login::Anonymous).await?;
             println!("Engine logged in to Steam (anonymous account).");
             // What the engine makes of fumes' installs, which is what lets

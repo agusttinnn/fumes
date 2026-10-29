@@ -465,10 +465,14 @@ fn steam_id_from_jwt(token: &str) -> Result<u64> {
         .context("the session token names no SteamID")
 }
 
-/// Where the engine keeps its own data (config, logs, its list of library
-/// folders). Only known for sure on macOS, where it uses Steam's usual
-/// folder under `HOME`.
-pub fn data_dir() -> Option<PathBuf> {
+/// Where the engine from `runtime` keeps its own data (config, logs, its
+/// list of library folders): Steam's usual folder under `HOME` on macOS,
+/// the engine's own folder on Windows (as Steam keeps it next to
+/// steam.exe). Not known on Linux.
+pub fn data_dir(runtime: &Path) -> Option<PathBuf> {
+    if cfg!(windows) {
+        return Some(runtime.to_owned());
+    }
     if !cfg!(target_os = "macos") {
         return None;
     }
