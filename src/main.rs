@@ -12,6 +12,7 @@ mod cdn;
 mod dirs;
 mod download;
 mod favorites;
+mod firstrun;
 mod friends;
 mod installs;
 mod kv;
@@ -103,11 +104,18 @@ enum Cmd {
         #[arg(last = true)]
         args: Vec<String>,
     },
+    /// Bring a game's Steam Cloud saves down to this machine, as Steam does
+    /// before playing. If both sides changed, asks which to keep.
+    Sync { game: String },
     /// The Steam engine fumes runs games with.
     Engine {
         #[command(subcommand)]
         action: EngineCmd,
     },
+    /// First-time setup steps that need administrator rights, run by an
+    /// elevated copy of fumes (see firstrun.rs).
+    #[command(hide = true)]
+    FirstRun { steps: String },
 }
 
 #[derive(Subcommand)]
@@ -226,8 +234,53 @@ async fn main() -> Result<()> {
             println!("Launching {} through Steam…", game.name);
             open_steam_url(&format!("steam://rungameid/{}", game.appid))
         }
+        Cmd::Sync { game } => sync(&dirs, &game).await,
+        #[cfg(windows)]
+        Cmd::FirstRun { steps } => std::process::exit(firstrun::elevated(&steps)),
+        #[cfg(not(windows))]
+        Cmd::FirstRun { .. } => bail!("first-time setup only runs on Windows"),
         Cmd::Engine { action } => engine(&dirs, action).await,
     }
+}
+
+/// Sign the engine in just to bring a game's cloud saves down. The last
+/// line it reports says how that went.
+async fn sync(dirs: &Dirs, query: &str) -> Result<()> {
+    let games = load_library(dirs, true).await?;
+    let game = library::find(&games, query)?;
+    let (appid, name) = (game.appid, &game.name);
+    let runtime = engine_runtime(dirs).await?;
+    let (account, token) = session::credentials(dirs)?;
+    report(format_args!("Signing in to Steam…"));
+    let client = start_engine(&runtime, Login::Token { account, token }).await?;
+    let result = (|| -> Result<()> {
+        match block(|| client.cloud_enabled(appid))? {
+            (false, _) => report(format_args!("Steam Cloud is off for your account.")),
+            (_, false) => report(format_args!("{name} doesn't keep saves in Steam Cloud.")),
+            _ => {
+                report(format_args!("Syncing cloud saves…"));
+                if sync_cloud(&client, appid, name, SyncDirection::Down)? {
+                    match block(|| client.cloud_state(appid))? {
+                        SyncState::Synchronized => {
+                            report(format_args!("{name}'s cloud saves are in sync."))
+                        }
+                        SyncState::ChangesLocally => report(format_args!(
+                            "{name}'s saves here are newer than the cloud's; they go up \
+                             after you next play."
+                        )),
+                        other => report(format_args!("{name}'s cloud saves ended up {other:?}.")),
+                    }
+                } else {
+                    report(format_args!(
+                        "{name}'s cloud saves weren't synced; nothing was changed."
+                    ));
+                }
+            }
+        }
+        Ok(())
+    })();
+    stop_engine(client).await?;
+    result
 }
 
 async fn install(
@@ -267,6 +320,7 @@ async fn install(
         os,
         language,
         dir,
+        common: dirs.library().join("steamapps/common"),
         verify,
     };
     let install = download::install(&connection, game.appid, &opts).await?;
@@ -293,6 +347,13 @@ async fn play(dirs: &Dirs, install: &Install, option: usize, args: &[String]) ->
     let native = install.os == download::host_os();
     let command = run::command(install, option, args)?;
     let key = run::launch_key(install, option)?;
+
+    // What Steam calls first-time setup: the runtimes (DirectX, Visual
+    // C++…), registry values and default files the game needs.
+    #[cfg(windows)]
+    if install.os == "windows" {
+        tokio::task::block_in_place(|| firstrun::prepare(install));
+    }
 
     let runtime = engine_runtime(dirs).await?;
     if !steam::register::ready()? {

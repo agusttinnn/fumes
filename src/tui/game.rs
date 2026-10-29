@@ -194,8 +194,13 @@ pub fn fake(appid: u32, title: &str, lines: &[&str]) -> Running {
     for line in lines {
         tx.send((*line).to_owned()).unwrap();
     }
-    // A real child, so the struct is whole; `true` exits at once.
-    let child = Command::new("true").spawn().unwrap();
+    // A real child, so the struct is whole; it exits at once.
+    let child = if cfg!(windows) {
+        Command::new("cmd").args(["/c", "exit 0"]).spawn()
+    } else {
+        Command::new("true").spawn()
+    }
+    .unwrap();
     Running {
         appid,
         title: title.into(),

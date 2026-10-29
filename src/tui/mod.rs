@@ -9,10 +9,10 @@
 //! Anything long or interactive (signing in, uninstalling) runs as the
 //! ordinary `fumes` command in a child process: the UI hands it the
 //! terminal and comes back when it's done, so progress output, prompts and
-//! Ctrl-C behave exactly as they do on the command line. Games and
-//! downloads are the exception: they run in the background (`game`) and
-//! the UI stays up, so friends can be messaged and invited while playing,
-//! and the library used while a game downloads. Downloads go one at a
+//! Ctrl-C behave exactly as they do on the command line. Games, cloud
+//! syncs and downloads are the exception: they run in the background
+//! (`game`) and the UI stays up, so friends can be messaged and invited
+//! while playing, and the library used while a game downloads. Downloads go one at a
 //! time, the rest waiting their turn. Friends and messages go over a Steam
 //! connection the UI keeps open (`online`).
 
@@ -164,6 +164,9 @@ enum Job {
     Command(Pending),
     /// A game, run in the background (`fumes launch …`).
     Play(Launch),
+    /// Bringing a game's cloud saves down, in the background (`fumes sync
+    /// …`).
+    Sync(Launch),
     /// An install, update or repair, downloaded in the background (`fumes
     /// install …`) once the downloads before it are done.
     Download(Launch),
@@ -273,10 +276,14 @@ struct App {
     /// A game waiting to start, and the one running in the background.
     launch: Option<Launch>,
     running: Option<Running>,
+    /// A cloud sync waiting to start, and the one going on. It signs the
+    /// engine in, so it can't overlap a game.
+    sync_request: Option<Launch>,
+    syncing: Option<Running>,
     /// The download in progress, and the ones waiting their turn.
     download: Option<Running>,
     queue: VecDeque<Launch>,
-    /// The running game is asking which cloud saves to keep.
+    /// The running game or cloud sync is asking which saves to keep.
     conflict: bool,
     quit: bool,
     updates_tx: mpsc::Sender<Update>,
@@ -316,6 +323,8 @@ impl App {
             pending: None,
             launch: None,
             running: None,
+            sync_request: None,
+            syncing: None,
             download: None,
             queue: VecDeque::new(),
             conflict: false,
@@ -333,6 +342,7 @@ impl App {
                 self.update(update);
             }
             self.watch_game();
+            self.watch_sync();
             self.watch_download();
             self.next_download();
             self.sync();
@@ -345,6 +355,9 @@ impl App {
             }
             if let Some(launch) = self.launch.take() {
                 self.start_game(launch);
+            }
+            if let Some(sync) = self.sync_request.take() {
+                self.start_sync(sync);
             }
             if let Some(pending) = self.pending.take() {
                 let worked = hand_over(terminal, &pending)?;
@@ -585,6 +598,50 @@ impl App {
         self.reload();
     }
 
+    /// Take in how the cloud sync is going; once it's over, its last line
+    /// says how it went.
+    fn watch_sync(&mut self) {
+        let Some(sync) = &mut self.syncing else {
+            return;
+        };
+        if sync.poll().conflict {
+            self.conflict = true;
+        }
+        let Some(status) = sync.finished() else {
+            return;
+        };
+        sync.drain();
+        let name = sync.title.clone();
+        self.status = Some(match &sync.error {
+            Some(error) => format!("Cloud sync of {name}: {error}"),
+            None if !status.success() => {
+                format!("Cloud sync of {name} didn't finish ({status}).")
+            }
+            None => sync.state.clone(),
+        });
+        self.syncing = None;
+        self.conflict = false;
+    }
+
+    /// The engine runs one session at a time: a game's, or a sync's.
+    fn start_sync(&mut self, sync: Launch) {
+        if let Some(game) = &self.running {
+            self.status = Some(format!(
+                "{} is running; its saves sync when it closes.",
+                game.title
+            ));
+            return;
+        }
+        if let Some(other) = &self.syncing {
+            self.status = Some(format!("Still syncing {}'s cloud saves.", other.title));
+            return;
+        }
+        match Running::start(sync.appid, sync.title, &sync.args) {
+            Ok(sync) => self.syncing = Some(sync),
+            Err(e) => self.status = Some(format!("{e:#}")),
+        }
+    }
+
     /// Notice when the download in progress is over.
     fn watch_download(&mut self) {
         let Some(download) = &mut self.download else {
@@ -643,6 +700,13 @@ impl App {
             self.status = Some(format!("{} is running; one game at a time.", running.title));
             return;
         }
+        if let Some(sync) = &self.syncing {
+            self.status = Some(format!(
+                "Syncing {}'s cloud saves; play once that's done.",
+                sync.title
+            ));
+            return;
+        }
         if self.downloading(launch.appid) {
             self.status = Some(format!(
                 "{} is downloading; it can be played once that's done.",
@@ -657,13 +721,21 @@ impl App {
     }
 
     /// Quitting while a game runs would cut its session short (saves not
-    /// uploaded, the engine not signed out), so it waits for the game. A
-    /// download can be picked up again later, so that only asks first.
+    /// uploaded, the engine not signed out), so it waits for the game, and
+    /// likewise for a cloud sync (it takes seconds). A download can be
+    /// picked up again later, so that only asks first.
     fn try_quit(&mut self) {
         if let Some(game) = &self.running {
             self.status = Some(format!(
                 "{} is still running. Close it first, so its saves upload.",
                 game.title
+            ));
+            return;
+        }
+        if let Some(sync) = &self.syncing {
+            self.status = Some(format!(
+                "Syncing {}'s cloud saves; quit once that's done.",
+                sync.title
             ));
             return;
         }
@@ -860,8 +932,9 @@ impl App {
                 KeyCode::Esc => None,
                 _ => return,
             };
-            if let Some(game) = &mut self.running {
-                game.answer(keep_local);
+            // Only one of them at a time is ever signed in.
+            if let Some(session) = self.running.as_mut().or(self.syncing.as_mut()) {
+                session.answer(keep_local);
             }
             self.conflict = false;
             return;
@@ -1198,14 +1271,15 @@ impl App {
                 args: args.iter().map(|a| a.to_string()).collect(),
             })
         };
+        let title = if name.is_empty() {
+            format!("App {appid}")
+        } else {
+            name.clone()
+        };
         let job = match action {
             Action::Play => Job::Play(Launch {
                 appid,
-                title: if name.is_empty() {
-                    format!("App {appid}")
-                } else {
-                    name.clone()
-                },
+                title,
                 args: vec!["launch".into(), id.clone()],
             }),
             Action::PlayInSteam => Job::Open(format!("steam://rungameid/{appid}")),
@@ -1213,10 +1287,11 @@ impl App {
             Action::Update => download(format!("Updating {name}"), &["install", &id]),
             Action::Verify => download(format!("Verifying {name}"), &["install", &id, "--verify"]),
             Action::StopDownload => return self.stop_download(appid),
-            Action::CloudSync => report(
-                format!("Syncing {name}'s cloud saves"),
-                &["engine", "cloud-info", &id, "--pull"],
-            ),
+            Action::CloudSync => Job::Sync(Launch {
+                appid,
+                title,
+                args: vec!["sync".into(), id.clone()],
+            }),
             Action::Dlc => Job::Open(format!("https://store.steampowered.com/dlc/{appid}")),
             Action::StorePage => Job::Open(format!("https://store.steampowered.com/app/{appid}")),
             Action::Uninstall => {
@@ -1298,6 +1373,7 @@ impl App {
         match job {
             Job::Command(pending) => self.pending = Some(pending),
             Job::Play(launch) => self.launch = Some(launch),
+            Job::Sync(sync) => self.sync_request = Some(sync),
             Job::Download(download) => {
                 if self.download.is_some() {
                     self.status = Some(format!(
@@ -1348,10 +1424,12 @@ impl App {
         if let Some(confirm) = &self.confirm {
             draw_confirm(frame, &confirm.question);
         }
-        if self.conflict
-            && let Some(game) = &self.running
-        {
-            draw_conflict(frame, &game.title);
+        if self.conflict {
+            if let Some(game) = &self.running {
+                draw_conflict(frame, &game.title, "don't play");
+            } else if let Some(sync) = &self.syncing {
+                draw_conflict(frame, &sync.title, "leave both as they are");
+            }
         }
     }
 
@@ -1673,6 +1751,15 @@ impl App {
                         ""
                     };
                     let mut details = game_details(game);
+                    if let Some(sync) = self.syncing.as_ref().filter(|s| s.appid == game.appid) {
+                        details.splice(
+                            0..0,
+                            [
+                                Line::styled(format!("☁ {}", sync.state), Style::new().fg(ACCENT)),
+                                Line::raw(""),
+                            ],
+                        );
+                    }
                     if self.downloading(game.appid) {
                         let state = match &self.download {
                             Some(d) if d.appid == game.appid => d.state.clone(),
@@ -1870,6 +1957,13 @@ impl App {
             spans.push(Span::styled(
                 format!(" ▶ {}: {} ", game.title, game.state.trim_end_matches('.')),
                 Style::new().fg(Color::Green),
+            ));
+            spans.push(Span::styled("│", Style::new().fg(DIM)));
+        }
+        if let Some(sync) = &self.syncing {
+            spans.push(Span::styled(
+                format!(" ☁ {}: {} ", sync.title, sync.state.trim_end_matches('.')),
+                Style::new().fg(ACCENT),
             ));
             spans.push(Span::styled("│", Style::new().fg(DIM)));
         }
@@ -2080,7 +2174,8 @@ fn draw_confirm(frame: &mut Frame, question: &str) {
     frame.render_widget(text, area);
 }
 
-fn draw_conflict(frame: &mut Frame, title: &str) {
+/// `cancel`: what Esc does.
+fn draw_conflict(frame: &mut Frame, title: &str, cancel: &str) {
     let area = centered(frame.area(), 60, 8);
     let text = Paragraph::new(vec![
         Line::raw(format!(
@@ -2089,7 +2184,7 @@ fn draw_conflict(frame: &mut Frame, title: &str) {
         )),
         Line::raw(""),
         Line::styled(
-            "[c] keep the cloud's   [l] keep this machine's   [Esc] don't play",
+            format!("[c] keep the cloud's   [l] keep this machine's   [Esc] {cancel}"),
             Style::new().fg(DIM),
         ),
     ])
@@ -2532,6 +2627,63 @@ mod tests {
         assert!(app.conflict);
         press(&mut app, KeyCode::Char('c'));
         assert!(!app.conflict);
+    }
+
+    #[test]
+    fn cloud_syncs_run_in_the_background_and_say_how_they_went() {
+        let mut app = app(vec![game(PORTAL_2, "Portal 2", Some(true))]);
+        // Library → Portal 2 → Cloud sync: not with the terminal handed over.
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.pending.is_none());
+        let sync = app.sync_request.take().unwrap();
+        assert_eq!(sync.args, ["sync", "620"]);
+
+        app.syncing = Some(game::fake(
+            PORTAL_2,
+            "Portal 2",
+            &["\u{1e}Syncing cloud saves…", game::CONFLICT_PROMPT],
+        ));
+        assert!(app.syncing.as_mut().unwrap().poll().conflict);
+        app.conflict = true;
+        press(&mut app, KeyCode::Char('l'));
+        assert!(!app.conflict);
+
+        // The engine is busy: playing and quitting wait for it.
+        app.start_game(Launch {
+            appid: PORTAL_2,
+            title: "Portal 2".into(),
+            args: vec!["launch".into(), "620".into()],
+        });
+        assert!(app.running.is_none());
+        press(&mut app, KeyCode::Char('q'));
+        assert!(!app.quit);
+        assert!(app.status.as_deref().unwrap().contains("Syncing"));
+
+        // Its last line is the result.
+        app.syncing = Some(game::fake(
+            PORTAL_2,
+            "Portal 2",
+            &[
+                "\u{1e}Signing in to Steam…",
+                "src\\tier0\\threadtools.cpp (3807) : Assertion Failed",
+                "\u{1e}Portal 2's cloud saves are in sync.",
+            ],
+        ));
+        while app.syncing.is_some() {
+            app.watch_sync();
+        }
+        assert_eq!(
+            app.status.as_deref(),
+            Some("Portal 2's cloud saves are in sync.")
+        );
+
+        // A game's own session syncs its saves; no second one meanwhile.
+        app.running = Some(game::fake(PORTAL_2, "Portal 2", &[]));
+        app.start_sync(sync);
+        assert!(app.syncing.is_none());
     }
 
     #[test]

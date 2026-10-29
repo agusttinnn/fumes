@@ -65,9 +65,24 @@ jobs:
           name: ${{ matrix.name }}
           path: ${{ matrix.name }}.*
 
+  # Windows-only code (first-time setup, the engine's registry) can only
+  # be compiled and tested there.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+      - run: cargo test --locked
+
   release:
     if: github.event_name == 'push'
-    needs: build
+    needs: [build, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

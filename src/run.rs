@@ -231,6 +231,7 @@ mod tests {
                 launch("bin\\win64\\game.exe", "default", &["windows"], Some("64")),
                 beta,
             ],
+            setup: None,
         };
         let exes: Vec<&str> = launch_options(&install)
             .iter()

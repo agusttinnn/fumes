@@ -106,23 +106,43 @@ pub const LINUX: Platform = Platform {
 pub const WINDOWS: Platform = Platform {
     name: "windows",
     manifest: include_str!("../../manifests/steam_client_win64.vdf"),
-    packages: &[(
-        "bins_win64",
-        Some(&[
-            "steamclient64.dll",
-            // Imported by steamclient64.dll.
-            "tier0_s64.dll",
-            "vstdlib_s64.dll",
-            // Loaded at runtime for crash reports.
-            "crashhandler64.dll",
-            // What 32-bit games load (ActiveProcess\SteamClientDll) to
-            // talk to the engine.
-            "steamclient.dll",
-            "tier0_s.dll",
-            "vstdlib_s.dll",
-            "crashhandler.dll",
-        ]),
-    )],
+    packages: &[
+        (
+            "bins_win64",
+            Some(&[
+                "steamclient64.dll",
+                // Imported by steamclient64.dll.
+                "tier0_s64.dll",
+                "vstdlib_s64.dll",
+                // Loaded at runtime for crash reports.
+                "crashhandler64.dll",
+                // What 32-bit games load (ActiveProcess\SteamClientDll) to
+                // talk to the engine.
+                "steamclient.dll",
+                "tier0_s.dll",
+                "vstdlib_s.dll",
+                "crashhandler.dll",
+                // Loaded on demand: controllers (Steam Input) and voice
+                // chat. The engine runs without them, but says so loudly.
+                // (Its GPU probe, bin\gldriverquery*.exe, is left out: it
+                // needs Visual C++ runtimes a bare Windows doesn't have.)
+                "SDL3.dll",
+                "video64.dll",
+            ]),
+        ),
+        (
+            "bins_codecs_win64",
+            // video64.dll's dependencies.
+            Some(&[
+                "libavcodec-62.dll",
+                "libavfilter-11.dll",
+                "libavformat-62.dll",
+                "libavutil-60.dll",
+                "libswresample-6.dll",
+                "libswscale-9.dll",
+            ]),
+        ),
+    ],
     engine: "steamclient64.dll",
     executables: &[],
 };

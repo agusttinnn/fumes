@@ -36,6 +36,9 @@ pub type DepotKey = [u8; 32];
 pub mod flags {
     pub const EXECUTABLE: u32 = 32;
     pub const DIRECTORY: u32 = 64;
+    /// An install script (`installscript.vdf`) Steam runs before the first
+    /// launch.
+    pub const INSTALL_SCRIPT: u32 = 256;
     pub const SYMLINK: u32 = 512;
 }
 
