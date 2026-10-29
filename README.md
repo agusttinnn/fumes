@@ -19,8 +19,8 @@ push:
 | macOS (Intel) | [fumes-macos-x86_64.tar.gz](https://github.com/agusttinnn/fumes/releases/download/continuous/fumes-macos-x86_64.tar.gz) |
 | Linux (x86-64) | [fumes-linux-x86_64.tar.gz](https://github.com/agusttinnn/fumes/releases/download/continuous/fumes-linux-x86_64.tar.gz) |
 
-Numbered versions (the latest is
-[here](https://github.com/agusttinnn/fumes/releases/latest)) are on the
+They're also the [latest release](https://github.com/agusttinnn/fumes/releases/latest);
+numbered versions are on the
 [releases page](https://github.com/agusttinnn/fumes/releases).
 Unpack it and run `fumes` (or `fumes.exe`) from a terminal; with no command
 it opens the terminal UI. The builds aren't signed, so macOS blocks a
@@ -31,7 +31,8 @@ you to confirm the first run.
 To build it yourself, use `cargo build --release`, or `cargo run --` in
 place of `fumes` in the commands below. Builds are made by
 `.github/workflows/release.yml`: every push to main updates the
-`continuous` release, and pushing a `v*` tag publishes that version.
+`continuous` release (always marked Latest), and pushing a `v*` tag
+publishes that version.
 
 ## Usage
 
