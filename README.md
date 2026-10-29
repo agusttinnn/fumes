@@ -42,6 +42,7 @@ cargo run -- library --installed       # only what's on this machine
 cargo run -- install "san andreas"     # by app id, exact name, or a unique part of the name
 cargo run -- engine setup              # macOS, once: lets games find the engine
 cargo run -- launch "san andreas"      # extra game arguments go after `--`
+cargo run -- sync "san andreas"        # bring its Steam Cloud saves down without playing
 cargo run -- uninstall 12120
 cargo run -- logout
 ```
@@ -76,8 +77,10 @@ stays usable, the bottom line shows how far along the download is, and
 the game is marked ↓ in the library. Downloads go one at a time; starting
 another queues it. **Stop download** stops one (or takes it out of the
 queue), and quitting mid-download asks first. Either way, starting it
-again picks up where it left off. Other commands the UI runs (sign in,
-uninstall) take the terminal, come back to the UI by themselves when they
+again picks up where it left off. **Cloud sync** runs in the background
+as well: the bottom line shows it going, and then whether the saves are
+in sync (a conflict is asked about as when playing). Other commands the
+UI runs (sign in, uninstall) take the terminal, come back to the UI by themselves when they
 work, and wait for Enter when they don't.
 
 Running `install` again updates the game or repairs it, and only downloads
