@@ -154,7 +154,7 @@ fn parse_manifest(text: &str, steamapps: &Path) -> Option<Installed> {
 
 /// `<library>/steamapps` and the install folder name, if `game` sits where
 /// Steam keeps games (`<library>/steamapps/common/<installdir>`).
-fn steamapps_of(game: &Path) -> Option<(PathBuf, String)> {
+pub fn steamapps_of(game: &Path) -> Option<(PathBuf, String)> {
     let common = game.parent()?;
     let steamapps = common.parent()?;
     let is = |p: &Path, name: &str| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(name));

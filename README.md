@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.svg" width="128" height="128" alt="The fumes logo: smoke rising from a glowing vent"></p>
+
 # fumes — a lightweight Steam client for the terminal
 
 A small Steam client in Rust, built on
@@ -44,6 +46,10 @@ cargo run -- install "san andreas"     # by app id, exact name, or a unique part
 cargo run -- engine setup              # macOS, once: lets games find the engine
 cargo run -- launch "san andreas"      # extra game arguments go after `--`
 cargo run -- sync "san andreas"        # bring its Steam Cloud saves down without playing
+cargo run -- workshop terraria         # the Workshop items you're subscribed to
+cargo run -- workshop terraria update  # download new and updated ones now
+cargo run -- workshop terraria open    # its Workshop in the browser, to find and subscribe
+cargo run -- folder terraria           # open the folder it's installed in
 cargo run -- uninstall 12120
 cargo run -- logout
 ```
@@ -51,7 +57,8 @@ cargo run -- logout
 `cargo run` with no command opens the terminal UI: sections on the left
 (library, friends, the store, your profile), the section's items in the
 middle, and what you can do with the selected one on the right (play,
-install, update, verify, cloud sync, DLC and store pages, uninstall).
+install, update, verify, cloud sync, Workshop, open its folder, DLC and
+store pages, uninstall).
 Arrow keys move, → or Enter goes deeper or runs the action, ← goes back;
 `/` searches the library (every word has to be in the name; initials
 like "gta" work too), `f` stars a game as a favorite so it's listed first,
@@ -83,6 +90,16 @@ as well: the bottom line shows it going, and then whether the saves are
 in sync (a conflict is asked about as when playing). Other commands the
 UI runs (sign in, uninstall) take the terminal, come back to the UI by themselves when they
 work, and wait for Enter when they don't.
+
+Workshop items work as in Steam: you find and subscribe to them on the
+game's Workshop pages (**Workshop ↗** opens them in the browser), and
+before each launch fumes downloads new and updated subscribed items, and
+removes the ones you've unsubscribed from. **Update Workshop items** does
+that now, in the background. Items go where Steam keeps them
+(`steamapps/workshop/content/<game>/<item>`), recorded in Steam's
+`appworkshop_<game>.acf`, so the game finds them through the Steamworks
+API like it would under Steam. If Steam can't be reached, the game starts
+with the items already there.
 
 Running `install` again updates the game or repairs it, and only downloads
 what changed. `--verify` re-checks every file instead of trusting the last
@@ -126,8 +143,8 @@ one **Update**.
   playtime. If local and cloud saves both changed, fumes asks which to
   keep. Ctrl-C reaches the game; fumes waits for it, and the upload,
   before signing out. Games the engine doesn't list as installed (Windows
-  builds under Wine, or any game on Linux/Windows for now) are started
-  directly, without cloud sync.
+  builds under Wine, or any game on Linux for now) are started directly,
+  without cloud sync.
 - **Games installed by the official client** still launch through
   `steam://` links. fumes reads those installs from Steam's
   `libraryfolders.vdf` and `appmanifest_*.acf` (`FUMES_STEAM_DIR` if Steam
@@ -165,9 +182,9 @@ and `~/.steam/sdk{32,64}` (Linux) or the `ActiveProcess` registry values
   engine, so only games that don't need Steamworks run that way.
 - **Not yet tested:** signing in with a real account through the engine,
   and Linux and Windows at runtime (the code type-checks for both).
-- The engine only lists fumes' games as installed on macOS so far, where its
-  data folder is known (`~/Library/Application Support/Steam`), so cloud
-  sync on launch is macOS-only for now.
+- On Linux the engine doesn't list fumes' games as installed yet (where it
+  keeps its data there isn't settled), so games start directly, without
+  cloud sync on launch.
 - Beta branches and password-protected branches (only `public` is used).
 - First-time setup is Windows-only: Windows builds under Wine don't get
   Steam's runtime installers (Wine has its own DirectX).

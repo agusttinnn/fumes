@@ -35,6 +35,9 @@ pub struct AppInfo {
     /// Every DLC the store lists for this app, owned or not.
     pub dlcs: Vec<u32>,
     pub buildid: u32,
+    /// The depot its Workshop items are stored in, when it isn't the app's
+    /// own id.
+    pub workshop_depot: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -243,6 +246,9 @@ pub fn parse(appid: u32, text: &str) -> Option<AppInfo> {
         launch,
         dlcs,
         buildid,
+        workshop_depot: depots
+            .and_then(|d| kv::get_num(d, "workshopdepot"))
+            .filter(|&d| d != 0),
     })
 }
 

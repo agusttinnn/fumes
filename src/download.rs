@@ -184,6 +184,39 @@ pub async fn install(connection: &Connection, appid: u32, opts: &Options) -> Res
     })
 }
 
+/// Bring `dir` to exactly the files of `manifests` (a Workshop item's, say):
+/// fetch only the chunks that aren't on disk yet, and remove files an
+/// earlier version had that this one dropped. The record of what's there
+/// is kept at `state`, outside the folder, since games may load every file
+/// in it. Returns the bytes fetched.
+pub async fn fill(
+    cdn: Arc<Cdn>,
+    dir: &Path,
+    state: &Path,
+    manifests: &[(Manifest, DepotKey)],
+) -> Result<u64> {
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let previous = State::load(state);
+    let files = merge(manifests);
+    let keys: HashMap<u32, DepotKey> = manifests.iter().map(|(m, k)| (m.depot, *k)).collect();
+    let prev_files: BTreeMap<String, String> = previous
+        .files
+        .iter()
+        .map(|(n, f)| (n.clone(), f.sha.clone()))
+        .collect();
+    let (plan_dir, plan_files) = (dir.to_owned(), files.clone());
+    let plan =
+        tokio::task::spawn_blocking(move || plan(&plan_dir, &plan_files, &keys, &prev_files))
+            .await??;
+    let needed: u64 = plan.jobs.iter().map(|j| j.chunk.size as u64).sum();
+    if !plan.jobs.is_empty() {
+        download(cdn, plan.jobs, needed).await?;
+    }
+    finish(dir, &files, &previous)?;
+    record(&files, &previous).save(state)?;
+    Ok(needed)
+}
+
 /// The shared depots' manifests, in a folder per app they come from
 /// (Steamworks Common Redistributables, "Steamworks Shared"). One Steam
 /// won't serve is skipped: the game may not need it.

@@ -47,7 +47,7 @@ use crate::friends::{
     self, Friend, GameInvite, Join, Message, Playing, Relationship, Status, SteamId,
 };
 use crate::library::{self, Game, Owned};
-use crate::{download, session, steam};
+use crate::{download, session, steam, workshop};
 use game::Running;
 use online::{Online, Request, Update};
 
@@ -106,6 +106,9 @@ enum Action {
     Verify,
     StopDownload,
     CloudSync,
+    Workshop,
+    UpdateWorkshop,
+    OpenFolder,
     Dlc,
     StorePage,
     Uninstall,
@@ -136,6 +139,9 @@ impl Action {
             Action::Verify => "Verify files",
             Action::StopDownload => "Stop download",
             Action::CloudSync => "Cloud sync",
+            Action::Workshop => "Workshop ↗",
+            Action::UpdateWorkshop => "Update Workshop items",
+            Action::OpenFolder => "Open folder",
             Action::Dlc => "DLC ↗",
             Action::StorePage => "Store page ↗",
             Action::Uninstall => "Uninstall",
@@ -867,11 +873,31 @@ impl App {
                 let running = self.running.as_ref().is_some_and(|g| g.appid == game.appid);
                 match &game.installed {
                     // Its files are in use.
-                    Some(i) if i.by_fumes && running => vec![Dlc, StorePage, favorite],
+                    Some(i) if i.by_fumes && running => {
+                        vec![Workshop, OpenFolder, Dlc, StorePage, favorite]
+                    }
                     Some(i) if i.by_fumes => vec![
-                        Play, CloudSync, Update, Verify, Dlc, StorePage, favorite, Uninstall,
+                        Play,
+                        CloudSync,
+                        Update,
+                        Verify,
+                        Workshop,
+                        UpdateWorkshop,
+                        OpenFolder,
+                        Dlc,
+                        StorePage,
+                        favorite,
+                        Uninstall,
                     ],
-                    Some(_) => vec![PlayInSteam, Dlc, StorePage, favorite, UninstallInSteam],
+                    Some(_) => vec![
+                        PlayInSteam,
+                        Workshop,
+                        OpenFolder,
+                        Dlc,
+                        StorePage,
+                        favorite,
+                        UninstallInSteam,
+                    ],
                     None => vec![Install, Dlc, StorePage, favorite],
                 }
             }
@@ -1292,6 +1318,25 @@ impl App {
                 title,
                 args: vec!["sync".into(), id.clone()],
             }),
+            Action::Workshop => Job::Open(workshop::page(appid)),
+            Action::UpdateWorkshop => download(
+                format!("Updating {name}'s Workshop items"),
+                &["workshop", &id, "update"],
+            ),
+            Action::OpenFolder => {
+                let Some(path) = self
+                    .game()
+                    .and_then(|g| g.installed.as_ref())
+                    .map(|i| i.path.clone())
+                else {
+                    return;
+                };
+                self.status = Some(match crate::open_folder(&path) {
+                    Ok(()) => format!("Opened {}.", path.display()),
+                    Err(e) => format!("{e:#}"),
+                });
+                return;
+            }
             Action::Dlc => Job::Open(format!("https://store.steampowered.com/dlc/{appid}")),
             Action::StorePage => Job::Open(format!("https://store.steampowered.com/app/{appid}")),
             Action::Uninstall => {
@@ -1468,10 +1513,36 @@ impl App {
                 _ => ListItem::new(format!(" {}", s.label())),
             })
             .collect();
-        let list = List::new(items)
-            .block(self.column(" fumes ".into(), Focus::Sections))
-            .highlight_style(self.highlight(Focus::Sections));
-        frame.render_stateful_widget(list, area, &mut self.sections);
+        let block = self.column(" fumes ".into(), Focus::Sections);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let list = List::new(items).highlight_style(self.highlight(Focus::Sections));
+        frame.render_stateful_widget(list, inner, &mut self.sections);
+
+        // The logo at the bottom, when there's room: smoke thinning out as
+        // it rises from a glowing vent.
+        let logo = [
+            (" (  )  (", DIM),
+            ("  )  ( )", Color::Gray),
+            (" (  )  (", Color::White),
+            (" ▀▀▀▀▀▀▀", Color::Yellow),
+        ];
+        let height = logo.len() as u16;
+        if inner.height > Section::ALL.len() as u16 + height {
+            let lines: Vec<Line> = logo
+                .iter()
+                .map(|&(text, color)| Line::styled(text, Style::new().fg(color)))
+                .collect();
+            let at = Rect {
+                y: inner.bottom() - height,
+                height,
+                ..inner
+            };
+            frame.render_widget(
+                Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
+                at,
+            );
+        }
     }
 
     /// The search bar at the top of a list, and the rest of the column
@@ -2614,7 +2685,13 @@ mod tests {
         // Its files are in use, and it's already playing.
         assert_eq!(
             app.actions(),
-            [Action::Dlc, Action::StorePage, Action::Favorite]
+            [
+                Action::Workshop,
+                Action::OpenFolder,
+                Action::Dlc,
+                Action::StorePage,
+                Action::Favorite
+            ]
         );
         press(&mut app, KeyCode::Char('q'));
         assert!(!app.quit);
@@ -2684,6 +2761,26 @@ mod tests {
         app.running = Some(game::fake(PORTAL_2, "Portal 2", &[]));
         app.start_sync(sync);
         assert!(app.syncing.is_none());
+    }
+
+    #[test]
+    fn workshop_items_update_in_the_background() {
+        let mut app = app(vec![game(2, "Beta", Some(true))]);
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Right);
+        let at = app
+            .actions()
+            .iter()
+            .position(|&a| a == Action::UpdateWorkshop)
+            .unwrap();
+        for _ in 0..at {
+            press(&mut app, KeyCode::Down);
+        }
+        press(&mut app, KeyCode::Enter);
+        assert!(app.pending.is_none());
+        let update = app.queue.pop_front().unwrap();
+        assert_eq!(update.args, ["workshop", "2", "update"]);
+        assert_eq!(update.title, "Updating Beta's Workshop items");
     }
 
     #[test]

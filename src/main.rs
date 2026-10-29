@@ -22,6 +22,7 @@ mod run;
 mod session;
 mod steam;
 mod tui;
+mod workshop;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -107,6 +108,16 @@ enum Cmd {
     /// Bring a game's Steam Cloud saves down to this machine, as Steam does
     /// before playing. If both sides changed, asks which to keep.
     Sync { game: String },
+    /// The Steam Workshop items you're subscribed to for a game (subscribe on
+    /// its Workshop page in the browser). fumes downloads them before each
+    /// launch, as Steam does.
+    Workshop {
+        game: String,
+        #[command(subcommand)]
+        action: Option<WorkshopCmd>,
+    },
+    /// Open the folder a game is installed in.
+    Folder { game: String },
     /// The Steam engine fumes runs games with.
     Engine {
         #[command(subcommand)]
@@ -116,6 +127,17 @@ enum Cmd {
     /// elevated copy of fumes (see firstrun.rs).
     #[command(hide = true)]
     FirstRun { steps: String },
+}
+
+#[derive(Subcommand)]
+enum WorkshopCmd {
+    /// List the items you're subscribed to, and whether they're downloaded.
+    List,
+    /// Download new and updated subscribed items now, and remove the ones
+    /// you've unsubscribed from.
+    Update,
+    /// Open the game's Workshop in the browser.
+    Open,
 }
 
 #[derive(Subcommand)]
@@ -235,6 +257,18 @@ async fn main() -> Result<()> {
             open_steam_url(&format!("steam://rungameid/{}", game.appid))
         }
         Cmd::Sync { game } => sync(&dirs, &game).await,
+        Cmd::Workshop { game, action } => {
+            workshop(&dirs, &game, action.unwrap_or(WorkshopCmd::List)).await
+        }
+        Cmd::Folder { game } => {
+            let games = load_library(&dirs, true).await?;
+            let game = library::find(&games, &game)?;
+            let installed = game
+                .installed
+                .as_ref()
+                .with_context(|| format!("{} isn't installed", game.name))?;
+            open_folder(&installed.path)
+        }
         #[cfg(windows)]
         Cmd::FirstRun { steps } => std::process::exit(firstrun::elevated(&steps)),
         #[cfg(not(windows))]
@@ -342,6 +376,81 @@ async fn install(
     Ok(())
 }
 
+async fn workshop(dirs: &Dirs, query: &str, action: WorkshopCmd) -> Result<()> {
+    let install = find_install(dirs, query).await?;
+    let (appid, name) = (install.appid, &install.name);
+    let steamapps = workshop::steamapps_for(dirs, &install);
+    match action {
+        WorkshopCmd::Open => open_url(&workshop::page(appid))?,
+        WorkshopCmd::List => {
+            let connection = session::connect(dirs).await?;
+            let items = workshop::subscribed(&connection, appid).await?;
+            if items.is_empty() {
+                println!(
+                    "You aren't subscribed to any of {name}'s Workshop items. Find some at {}",
+                    workshop::page(appid)
+                );
+                return Ok(());
+            }
+            let have = workshop::installed(&steamapps, appid);
+            for item in &items {
+                let state = match have.get(&item.id) {
+                    Some(had) if had.manifest == item.manifest && had.updated == item.updated => {
+                        "downloaded"
+                    }
+                    Some(_) => "update waiting",
+                    None => "not downloaded yet",
+                };
+                println!(
+                    "{:>12}  {}  ({}, {state})",
+                    item.id,
+                    item.title,
+                    download::human(item.size)
+                );
+            }
+            println!(
+                "{} item{}. They're downloaded when you launch {name}, or now with \
+                 `fumes workshop {appid} update`.",
+                items.len(),
+                if items.len() == 1 { "" } else { "s" }
+            );
+        }
+        WorkshopCmd::Update => {
+            let connection = session::connect(dirs).await?;
+            let count = workshop::update(&connection, appid, &steamapps).await?;
+            report(format_args!(
+                "{name}: {count} Workshop item{} up to date.",
+                if count == 1 { "" } else { "s" }
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What Steam does before a launch: bring the Workshop items in line with
+/// the subscriptions. Being offline (or Steam not answering) doesn't stop
+/// the game; it starts with the items already there.
+async fn update_workshop(dirs: &Dirs, install: &Install) {
+    let steamapps = workshop::steamapps_for(dirs, install);
+    let result = async {
+        let connection = session::connect(dirs).await?;
+        workshop::update(&connection, install.appid, &steamapps).await
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(600), result).await {
+        Ok(Ok(0)) => {}
+        Ok(Ok(count)) => report(format_args!(
+            "{count} Workshop item{} up to date.",
+            if count == 1 { "" } else { "s" }
+        )),
+        Ok(Err(e)) => report_problem(format_args!(
+            "warning: Workshop items weren't updated ({e:#}); starting with what's here"
+        )),
+        Err(_) => report_problem(format_args!(
+            "warning: updating Workshop items took too long; starting with what's here"
+        )),
+    }
+}
+
 /// Run a game fumes installed with the Steam engine logged in behind it.
 async fn play(dirs: &Dirs, install: &Install, option: usize, args: &[String]) -> Result<()> {
     let native = install.os == download::host_os();
@@ -354,6 +463,9 @@ async fn play(dirs: &Dirs, install: &Install, option: usize, args: &[String]) ->
     if install.os == "windows" {
         tokio::task::block_in_place(|| firstrun::prepare(install));
     }
+
+    report(format_args!("Checking Workshop items…"));
+    update_workshop(dirs, install).await;
 
     let runtime = engine_runtime(dirs).await?;
     if !steam::register::ready()? {
@@ -806,6 +918,37 @@ fn open_steam_url(url: &str) -> Result<()> {
 }
 
 /// Open a link (web page or `steam://`) with the system's handler.
+/// Show a folder in Finder, Explorer or the desktop's file manager.
+fn open_folder(path: &Path) -> Result<()> {
+    if !path.is_dir() {
+        bail!("{} isn't there anymore", path.display());
+    }
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    // Explorer opens Documents instead of a path with `/` in it.
+    let path = if cfg!(windows) {
+        PathBuf::from(path.to_string_lossy().replace('/', "\\"))
+    } else {
+        path.to_owned()
+    };
+    let status = Command::new(program)
+        .arg(&path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .with_context(|| format!("could not open {}", path.display()))?;
+    // Explorer exits with 1 even when it opened the folder.
+    if !status.success() && !cfg!(windows) {
+        bail!("opening {} failed", path.display());
+    }
+    Ok(())
+}
+
 fn open_url(url: &str) -> Result<()> {
     let mut command = if cfg!(target_os = "macos") {
         Command::new("open")

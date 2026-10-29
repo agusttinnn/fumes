@@ -7,9 +7,13 @@
 <title>fumes — a lightweight Steam client for the terminal</title>
 <meta name="description" content="fumes is a small Steam client written in Rust. Install, update and play your Steam games from the terminal, without the Steam UI, with cloud saves, achievements and friends still working.">
 <link rel="canonical" href="https://agusttinnn.github.io/fumes/">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="icon" href="logo.png" type="image/png">
+<link rel="apple-touch-icon" href="logo.png">
 <meta property="og:type" content="website">
 <meta property="og:title" content="fumes — a lightweight Steam client for the terminal">
 <meta property="og:description" content="Install and play your Steam games from the terminal, without the Steam UI. Written in Rust.">
+<meta property="og:image" content="https://agusttinnn.github.io/fumes/logo.png">
 <meta property="og:url" content="https://agusttinnn.github.io/fumes/">
 <meta name="twitter:card" content="summary">
 <script type="application/ld+json">
@@ -69,6 +73,7 @@
     font-weight: bold;
     letter-spacing: 0.02em;
   }
+  .titlebar .name { display: flex; align-items: center; gap: 6px; }
   .titlebar .controls { display: flex; gap: 3px; }
   .titlebar .controls i {
     display: inline-grid;
@@ -83,6 +88,7 @@
     border-color: var(--hi) var(--lo) var(--lo) var(--hi);
   }
   .content { padding: 8px 20px 24px; }
+  .logo { display: block; width: 96px; height: 96px; margin: 16px 0 4px; }
 
   h1 {
     font: bold 26px/1.2 Verdana, Tahoma, sans-serif;
@@ -198,10 +204,11 @@
 <body>
 <div class="window">
   <div class="titlebar">
-    <span>fumes</span>
+    <span class="name"><img src="logo.svg" width="16" height="16" alt="">fumes</span>
     <span class="controls" aria-hidden="true"><i>_</i><i>×</i></span>
   </div>
   <main class="content">
+    <img class="logo" src="logo.svg" width="96" height="96" alt="The fumes logo: smoke rising from a glowing vent">
     <h1>fumes — a lightweight Steam client for the terminal</h1>
     <p class="lede">Install, update and play your Steam games without the Steam UI.
     fumes downloads games straight from Steam's content servers and runs them with
@@ -219,6 +226,7 @@
         <li><strong>Your whole Steam library</strong> in a terminal UI: search, favorites, install, update, verify and uninstall.</li>
         <li><strong>Resumable downloads</strong> that only fetch what changed, using the same protocol as the Steam client.</li>
         <li><strong>Steam Cloud saves</strong> come down before you play and go up after, with a prompt when local and cloud saves conflict.</li>
+        <li><strong>Steam Workshop</strong>: the items you subscribe to on the Workshop download and update before you play, where the game expects them.</li>
         <li><strong>Friends and chat</strong>: see who's online and what they're playing, send messages, join friends' games and send invites.</li>
         <li><strong>Small footprint</strong>: one program, plus only the Steam engine (about 100 MB on macOS instead of ~400 MB for the full client).</li>
         <li><strong>Works alongside Steam</strong>: games installed by the official client are listed and launch too.</li>

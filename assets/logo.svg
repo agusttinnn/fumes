@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>fumes</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4c5844"/>
+      <stop offset="1" stop-color="#1c2018"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="128" cy="204" r="70" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#c4b550" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#c4b550" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Smoke thins out as it rises. -->
+    <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.1"/>
+      <stop offset="0.55" stop-color="#fff" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="1"/>
+    </linearGradient>
+    <mask id="rise" maskUnits="userSpaceOnUse" x="0" y="0" width="256" height="256">
+      <rect width="256" height="256" fill="url(#fade)"/>
+    </mask>
+    <clipPath id="inside">
+      <rect x="8" y="8" width="240" height="240" rx="54"/>
+    </clipPath>
+  </defs>
+
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#tile)"/>
+  <g clip-path="url(#inside)">
+    <rect x="8" y="120" width="240" height="128" fill="url(#glow)"/>
+    <g mask="url(#rise)" fill="none" stroke-linecap="round">
+      <!-- A soft haze around each wisp, then the wisp itself. -->
+      <g stroke="#dedfd6" stroke-opacity="0.16">
+        <path d="M112 192 C 84 172, 104 150, 86 128 S 62 96, 80 72" stroke-width="30"/>
+        <path d="M146 192 C 176 172, 156 148, 174 124 S 198 94, 182 68" stroke-width="28"/>
+        <path d="M128 194 C 92 164, 166 136, 128 104 S 92 58, 138 30" stroke-width="46"/>
+      </g>
+      <path d="M112 192 C 84 172, 104 150, 86 128 S 62 96, 80 72 Q 88 60, 100 64"
+            stroke="#a0aa95" stroke-width="13"/>
+      <path d="M146 192 C 176 172, 156 148, 174 124 S 198 94, 182 68 Q 174 56, 162 62"
+            stroke="#a0aa95" stroke-width="11"/>
+      <path d="M128 194 C 92 164, 166 136, 128 104 S 92 58, 138 30"
+            stroke="#dedfd6" stroke-width="24"/>
+    </g>
+    <!-- The vent the smoke comes out of. -->
+    <ellipse cx="128" cy="206" rx="52" ry="14" fill="#5f5720"/>
+    <ellipse cx="128" cy="203" rx="44" ry="9" fill="#958831"/>
+    <ellipse cx="128" cy="201" rx="30" ry="5" fill="#f2e7a0"/>
+  </g>
+  <rect x="9.5" y="9.5" width="237" height="237" rx="52.5" fill="none"
+        stroke="#8c9284" stroke-opacity="0.35" stroke-width="3"/>
+</svg>
