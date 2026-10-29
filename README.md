@@ -1,4 +1,4 @@
-# fumes
+# fumes — a lightweight Steam client for the terminal
 
 A small Steam client in Rust, built on
 [steam-vent](https://codeberg.org/steam-vent/steam-vent). It downloads your
@@ -88,6 +88,17 @@ what changed. `--verify` re-checks every file instead of trusting the last
 install. `install --steam` and `launch --steam` hand the job to the
 official client instead.
 
+On Windows, games also need what Steam calls first-time setup: runtimes
+such as DirectX, Visual C++ and .NET (without them a game stops at
+errors like "d3dx9_42.dll was not found"), plus registry values and
+default files. fumes downloads the shared runtimes a game uses into
+`steamapps/common/Steamworks Shared`, as Steam does, and before a launch
+runs whatever the game's install scripts still need. Installers need
+administrator rights, so Windows asks for permission once; what's done
+is recorded where Steam records it, so nothing is installed twice, by
+either. Games installed by an earlier fumes get the shared runtimes after
+one **Update**.
+
 ## What talks to what
 
 - **Sign-in and the owned-games list** go straight to Steam's servers through
@@ -157,8 +168,8 @@ and `~/.steam/sdk{32,64}` (Linux) or the `ActiveProcess` registry values
   data folder is known (`~/Library/Application Support/Steam`), so cloud
   sync on launch is macOS-only for now.
 - Beta branches and password-protected branches (only `public` is used).
-- Redistributables Steam installs once per machine (`sharedinstall`
-  depots such as DirectX or VC++ runtimes).
+- First-time setup is Windows-only: Windows builds under Wine don't get
+  Steam's runtime installers (Wine has its own DirectX).
 - QR-code sign-in (steam-vent doesn't support it yet), and a GUI.
 
 ## Notes

@@ -308,8 +308,9 @@ mod tests {
                 "\"libraryfolders\"\n{{\n\t\"contentstatsid\"\t\"123\"\n\
                  \t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\
                  \t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t\t\"apps\" {{ \"12210\" \"1024\" }}\n\t}}\n}}\n",
-                root.path().display(),
-                extra.path().display()
+                // Escaped, as Steam writes them (Windows paths).
+                root.path().display().to_string().replace('\\', "\\\\"),
+                extra.path().display().to_string().replace('\\', "\\\\")
             ),
         )
         .unwrap();

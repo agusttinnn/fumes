@@ -245,6 +245,22 @@ pub enum Step {
 }
 
 impl Step {
+    /// An installer given by its full path that isn't on disk.
+    pub fn missing_program(&self) -> Option<&str> {
+        let Step::Run(process) = self else {
+            return None;
+        };
+        process
+            .commands
+            .iter()
+            .map(|(program, _)| program.as_str())
+            .find(|program| {
+                let path = Path::new(program);
+                // A bare name ("msiexec") is looked up on the PATH.
+                (path.is_absolute() || program.contains(['\\', '/'])) && !path.exists()
+            })
+    }
+
     /// Needs administrator rights.
     pub fn elevated(&self) -> bool {
         match self {
@@ -548,6 +564,27 @@ pub fn copy_missing(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A script's text. Old ones may be UTF-16 (with a byte-order mark) or in
+/// the Windows code page rather than UTF-8.
+pub fn read_script(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    if let Some(utf16) = bytes.strip_prefix(&[0xff, 0xfe]) {
+        let units: Vec<u16> = utf16
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| u16::from_le_bytes(pair))
+            .collect();
+        return Some(String::from_utf16_lossy(&units));
+    }
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+    Some(match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_owned(),
+        // Windows-1252 agrees with Latin-1 on everything a script uses.
+        Err(_) => bytes.iter().map(|&b| b as char).collect(),
+    })
+}
+
 /// What an installer's exit code means for whether it worked: 3010 and
 /// 1641 want a restart, 1638 found the same or a newer version.
 pub fn succeeded(code: i32) -> bool {
@@ -598,7 +635,7 @@ mod windows {
         };
         let mut pending = Vec::new();
         for script in &scripts {
-            let Ok(text) = std::fs::read_to_string(&script.path) else {
+            let Some(text) = read_script(&script.path) else {
                 tracing::warn!("{} is missing", script.path.display());
                 continue;
             };
@@ -610,6 +647,17 @@ mod windows {
                 Err(e) => report_problem(format_args!("warning: {e:#}")),
             }
         }
+        // An installer that isn't there would fail behind a permission
+        // prompt on every launch.
+        pending.retain(|step| match step.missing_program() {
+            Some(program) => {
+                report_problem(format_args!(
+                    "warning: first-time setup can't find {program}; skipping it"
+                ));
+                false
+            }
+            None => true,
+        });
 
         let (elevated, own): (Vec<Step>, Vec<Step>) = pending.into_iter().partition(Step::elevated);
         for step in &own {
@@ -978,19 +1026,26 @@ mod windows {
         #[test]
         fn the_elevated_side_takes_its_steps_from_the_command_line() {
             let key = TestKey::new("elevated");
-            let steps = vec![
-                Step::Set(key.value("a", Data::Dword(5))),
+            let run = |name: &str, exit: u32| {
                 Step::Run(Process {
-                    label: "Test (fails)".into(),
-                    ran: key.value("b", Data::Dword(1)),
-                    commands: vec![("cmd.exe".into(), "/c exit 1603".into())],
+                    label: format!("Test ({name})"),
+                    ran: key.value(name, Data::Dword(1)),
+                    commands: vec![("cmd.exe".into(), format!("/c exit {exit}"))],
                     ignore_exit_code: false,
-                }),
+                })
+            };
+            let steps = vec![
+                // Not one for administrators: left to the non-elevated side.
+                Step::Set(key.value("user", Data::Dword(5))),
+                run("works", 0),
+                run("fails", 1603),
             ];
             let encoded = base64::engine::general_purpose::STANDARD
                 .encode(serde_json::to_vec(&steps).unwrap());
             assert_eq!(elevated(&encoded), 1);
-            assert!(done(&steps[0]) && !done(&steps[1]));
+            assert!(!done(&steps[0]));
+            assert!(done(&steps[1]));
+            assert!(!done(&steps[2]));
             assert_eq!(elevated("not base64!"), 2);
         }
 
@@ -1261,6 +1316,42 @@ mod tests {
             redist_label("installscript.vdf"),
             "Steamworks redistributables"
         );
+    }
+
+    #[test]
+    fn reads_scripts_in_any_encoding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("installscript.vdf");
+        let text = "\"InstallScript\" { \"Copy Folders\" { } } // Café";
+        let mut utf16 = vec![0xff, 0xfe];
+        utf16.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        std::fs::write(&path, &utf16).unwrap();
+        assert_eq!(read_script(&path).unwrap(), text);
+        std::fs::write(&path, b"// Caf\xe9").unwrap();
+        assert_eq!(read_script(&path).unwrap(), "// Café");
+        assert!(read_script(&dir.path().join("none")).is_none());
+    }
+
+    #[test]
+    fn notices_installers_that_are_missing() {
+        let run = |program: &str| {
+            Step::Run(Process {
+                label: String::new(),
+                ran: Value {
+                    hive: Hive::LocalMachine,
+                    key: "k".into(),
+                    name: "n".into(),
+                    data: Data::Dword(1),
+                },
+                commands: vec![(program.into(), String::new())],
+                ignore_exit_code: false,
+            })
+        };
+        let here = std::env::current_exe().unwrap();
+        assert_eq!(run(here.to_str().unwrap()).missing_program(), None);
+        assert_eq!(run("msiexec").missing_program(), None);
+        let gone = here.with_file_name("not-there.exe");
+        assert!(run(gone.to_str().unwrap()).missing_program().is_some());
     }
 
     #[test]
