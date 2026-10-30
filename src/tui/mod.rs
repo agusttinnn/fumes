@@ -22,7 +22,7 @@ mod online;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::process::Command;
-use std::sync::mpsc;
+use std::sync::{LazyLock, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -36,8 +36,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar,
-    ScrollbarOrientation, ScrollbarState, Wrap,
+    Block, Clear, List, ListItem, ListState, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
 };
 use ratatui::{DefaultTerminal, Frame};
 
@@ -51,8 +51,22 @@ use crate::{download, session, steam, workshop};
 use game::Running;
 use online::{Online, Request, Update};
 
-const ACCENT: Color = Color::Cyan;
-const DIM: Color = Color::DarkGray;
+// Old Steam's colors, as on the website: olive panels with beveled edges,
+// gold for what matters, muted green-gray for the rest.
+const OLIVE: Color = Color::Rgb(0x4c, 0x58, 0x44);
+const OLIVE_DARK: Color = Color::Rgb(0x3e, 0x46, 0x37);
+const HI: Color = Color::Rgb(0x8c, 0x92, 0x84);
+const LO: Color = Color::Rgb(0x28, 0x2e, 0x22);
+const TEXT: Color = Color::Rgb(0xde, 0xdf, 0xd6);
+const MUTED: Color = Color::Rgb(0xa0, 0xaa, 0x95);
+const GOLD: Color = Color::Rgb(0xc4, 0xb5, 0x50);
+const SELECT: Color = Color::Rgb(0x95, 0x88, 0x31);
+const WHITE: Color = Color::Rgb(0xff, 0xff, 0xff);
+// Friends' states, and installs: in-game green, online blue, away in a
+// duller blue.
+const GREEN: Color = Color::Rgb(0x9b, 0xc8, 0x5a);
+const BLUE: Color = Color::Rgb(0x8c, 0xb4, 0xd6);
+const DUSK: Color = Color::Rgb(0x6f, 0x8f, 0xa8);
 const STORE_URL: &str = "https://store.steampowered.com/";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1447,6 +1461,10 @@ impl App {
     // Drawing
 
     fn draw(&mut self, frame: &mut Frame) {
+        frame.render_widget(
+            Block::new().style(Style::new().bg(OLIVE).fg(TEXT)),
+            frame.area(),
+        );
         let [main, footer] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
         // Conversations need the room more than the friends list does.
@@ -1465,6 +1483,9 @@ impl App {
             Section::Profile => self.draw_profile(frame, middle),
         }
         self.draw_details(frame, right);
+        for column in [left, middle, right] {
+            bevel(frame, column);
+        }
         self.draw_footer(frame, footer);
         if let Some(confirm) = &self.confirm {
             draw_confirm(frame, &confirm.question);
@@ -1476,18 +1497,21 @@ impl App {
                 draw_conflict(frame, &sync.title, "leave both as they are");
             }
         }
+        if !*TRUECOLOR {
+            for cell in &mut frame.buffer_mut().content {
+                cell.fg = to_256(cell.fg);
+                cell.bg = to_256(cell.bg);
+            }
+        }
     }
 
     fn column(&self, title: String, focus: Focus) -> Block<'static> {
         let focused = self.focus == focus;
-        Block::bordered()
-            .border_type(if focused {
-                BorderType::Thick
-            } else {
-                BorderType::Rounded
-            })
-            .border_style(Style::new().fg(if focused { ACCENT } else { DIM }))
-            .title(title)
+        Block::bordered().title(title).title_style(if focused {
+            Style::new().fg(GOLD).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(MUTED)
+        })
     }
 
     /// The selected row: filled in the focused column, just colored in the
@@ -1495,9 +1519,9 @@ impl App {
     fn highlight(&self, focus: Focus) -> Style {
         let style = Style::new().add_modifier(Modifier::BOLD);
         if self.focus == focus {
-            style.bg(ACCENT).fg(Color::Black)
+            style.bg(SELECT).fg(WHITE)
         } else {
-            style.fg(ACCENT)
+            style.fg(GOLD)
         }
     }
 
@@ -1508,7 +1532,7 @@ impl App {
             .map(|&s| match s {
                 Section::Friends if unread > 0 => ListItem::new(Line::from(vec![
                     Span::raw(format!(" {} ", s.label())),
-                    Span::styled(format!("({unread})"), Style::new().fg(Color::Yellow)),
+                    Span::styled(format!("({unread})"), Style::new().fg(GOLD)),
                 ])),
                 _ => ListItem::new(format!(" {}", s.label())),
             })
@@ -1519,20 +1543,19 @@ impl App {
         let list = List::new(items).highlight_style(self.highlight(Focus::Sections));
         frame.render_stateful_widget(list, inner, &mut self.sections);
 
-        // The logo at the bottom, when there's room: smoke thinning out as
-        // it rises from a glowing vent.
-        let logo = [
-            (" (  )  (", DIM),
-            ("  )  ( )", Color::Gray),
-            (" (  )  (", Color::White),
-            (" ▀▀▀▀▀▀▀", Color::Yellow),
+        // The logo at the bottom, when there's room: a prompt, with smoke
+        // thinning out as it rises from the cursor.
+        let lines = vec![
+            Line::styled("     ·:·", Style::new().fg(HI)),
+            Line::styled("    ·:· ", Style::new().fg(MUTED)),
+            Line::styled("   ::   ", Style::new().fg(TEXT)),
+            Line::from(vec![
+                Span::styled(" > ", Style::new().fg(TEXT)),
+                Span::styled("▄▄▄  ", Style::new().fg(GOLD)),
+            ]),
         ];
-        let height = logo.len() as u16;
+        let height = lines.len() as u16;
         if inner.height > Section::ALL.len() as u16 + height {
-            let lines: Vec<Line> = logo
-                .iter()
-                .map(|&(text, color)| Line::styled(text, Style::new().fg(color)))
-                .collect();
             let at = Rect {
                 y: inner.bottom() - height,
                 height,
@@ -1557,9 +1580,9 @@ impl App {
         self.page = list_area.height.max(1) as usize;
 
         let typing = self.editing == Some(Field::Search);
-        let icon = Span::styled(" / ", Style::new().fg(if typing { ACCENT } else { DIM }));
+        let icon = Span::styled(" / ", Style::new().fg(if typing { GOLD } else { MUTED }));
         let bar = if text.is_empty() && !typing {
-            Line::from(vec![icon, Span::styled("Search", Style::new().fg(DIM))])
+            Line::from(vec![icon, Span::styled("Search", Style::new().fg(MUTED))])
         } else {
             Line::from(vec![icon, Span::raw(text.to_owned())])
         };
@@ -1599,7 +1622,7 @@ impl App {
             } else {
                 "No games."
             };
-            let text = Paragraph::new(format!(" {message}")).style(Style::new().fg(DIM));
+            let text = Paragraph::new(format!(" {message}")).style(Style::new().fg(MUTED));
             frame.render_widget(text, list_area);
             return;
         }
@@ -1653,7 +1676,7 @@ impl App {
                 Link::Connected => "No friends yet.".into(),
             };
             let text = Paragraph::new(message)
-                .style(Style::new().fg(DIM))
+                .style(Style::new().fg(MUTED))
                 .wrap(Wrap { trim: true })
                 .block(Block::new().padding(Padding::horizontal(1)));
             frame.render_widget(text, list_area);
@@ -1677,10 +1700,7 @@ impl App {
         let unread = self.chats.get(&friend.steamid).map_or(0, |c| c.unread);
         let mut spans = vec![
             Span::styled(" ●", Style::new().fg(color)),
-            Span::styled(
-                if favorite { " ★ " } else { "   " },
-                Style::new().fg(Color::Yellow),
-            ),
+            Span::styled(if favorite { " ★ " } else { "   " }, Style::new().fg(GOLD)),
             Span::styled(
                 friend_label(friend),
                 if unread > 0 {
@@ -1693,12 +1713,15 @@ impl App {
         if unread > 0 {
             spans.push(Span::styled(
                 format!(" ({unread})"),
-                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::new().fg(GOLD).add_modifier(Modifier::BOLD),
             ));
         }
         // Online is what the dot already says; the rest is worth spelling out.
         if friend.playing.is_some() || friend.relationship != Relationship::Friend {
-            spans.push(Span::styled(format!(" · {presence}"), Style::new().fg(DIM)));
+            spans.push(Span::styled(
+                format!(" · {presence}"),
+                Style::new().fg(MUTED),
+            ));
         }
         ListItem::new(Line::from(spans))
     }
@@ -1706,23 +1729,21 @@ impl App {
     /// What a friend is up to, and the color for it.
     fn presence(&self, friend: &Friend) -> (String, Color) {
         match (friend.relationship, &friend.playing, friend.status) {
-            (Relationship::RequestReceived, ..) => {
-                ("sent you a friend request".into(), Color::Yellow)
-            }
-            (Relationship::RequestSent, ..) => ("friend request sent".into(), DIM),
-            (_, Some(Playing::Named(game)), _) => (format!("playing {game}"), Color::Green),
+            (Relationship::RequestReceived, ..) => ("sent you a friend request".into(), GOLD),
+            (Relationship::RequestSent, ..) => ("friend request sent".into(), MUTED),
+            (_, Some(Playing::Named(game)), _) => (format!("playing {game}"), GREEN),
             (_, Some(Playing::App(appid)), _) => {
                 let game = self.games.iter().find(|g| g.appid == *appid);
                 let text = match game {
                     Some(game) => format!("playing {}", display_name(game)),
                     None => "in a game".into(),
                 };
-                (text, Color::Green)
+                (text, GREEN)
             }
-            (_, None, Status::Online) => ("online".into(), Color::LightBlue),
-            (_, None, Status::Busy) => ("busy".into(), Color::Blue),
-            (_, None, Status::Away) => ("away".into(), Color::Blue),
-            (_, None, Status::Offline) => ("offline".into(), DIM),
+            (_, None, Status::Online) => ("online".into(), BLUE),
+            (_, None, Status::Busy) => ("busy".into(), DUSK),
+            (_, None, Status::Away) => ("away".into(), DUSK),
+            (_, None, Status::Offline) => ("offline".into(), MUTED),
         }
     }
 
@@ -1730,7 +1751,7 @@ impl App {
         let text = Paragraph::new(vec![
             Line::raw("The Steam store opens in your browser."),
             Line::raw(""),
-            Line::styled("Press → or Enter.", Style::new().fg(DIM)),
+            Line::styled("Press → or Enter.", Style::new().fg(MUTED)),
         ])
         .wrap(Wrap { trim: false })
         .block(
@@ -1750,7 +1771,7 @@ impl App {
                 Line::styled("Not signed in", Style::new().add_modifier(Modifier::BOLD)),
                 Line::styled(
                     "Sign in from the column on the right.",
-                    Style::new().fg(DIM),
+                    Style::new().fg(MUTED),
                 ),
             ],
         };
@@ -1826,7 +1847,7 @@ impl App {
                         details.splice(
                             0..0,
                             [
-                                Line::styled(format!("☁ {}", sync.state), Style::new().fg(ACCENT)),
+                                Line::styled(format!("☁ {}", sync.state), Style::new().fg(GOLD)),
                                 Line::raw(""),
                             ],
                         );
@@ -1839,7 +1860,7 @@ impl App {
                         details.splice(
                             0..0,
                             [
-                                Line::styled(format!("↓ {state}"), Style::new().fg(ACCENT)),
+                                Line::styled(format!("↓ {state}"), Style::new().fg(GOLD)),
                                 Line::raw(""),
                             ],
                         );
@@ -1850,7 +1871,7 @@ impl App {
                             [
                                 Line::styled(
                                     format!("▶ {}", running.state),
-                                    Style::new().fg(Color::Green),
+                                    Style::new().fg(GREEN),
                                 ),
                                 Line::raw(""),
                             ],
@@ -1860,7 +1881,7 @@ impl App {
                             running
                                 .log
                                 .iter()
-                                .map(|l| Line::styled(l.clone(), Style::new().fg(DIM))),
+                                .map(|l| Line::styled(l.clone(), Style::new().fg(MUTED))),
                         );
                     }
                     (
@@ -1946,7 +1967,7 @@ impl App {
         ])
         .areas(area);
         frame.render_widget(
-            Paragraph::new("─".repeat(rule_area.width as usize)).style(Style::new().fg(DIM)),
+            Paragraph::new("─".repeat(rule_area.width as usize)).style(Style::new().fg(MUTED)),
             rule_area,
         );
 
@@ -1959,14 +1980,14 @@ impl App {
                 .flat_map(|m| message_lines(m, &name))
                 .collect(),
             Some(chat) if chat.loaded => {
-                vec![Line::styled("No messages yet.", Style::new().fg(DIM))]
+                vec![Line::styled("No messages yet.", Style::new().fg(MUTED))]
             }
             _ if self.link == Link::Connected => {
-                vec![Line::styled("Loading messages…", Style::new().fg(DIM))]
+                vec![Line::styled("Loading messages…", Style::new().fg(MUTED))]
             }
             _ => vec![Line::styled(
                 "Messages load once fumes is connected to Steam.",
-                Style::new().fg(DIM),
+                Style::new().fg(MUTED),
             )],
         };
         let messages = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -1976,7 +1997,7 @@ impl App {
         frame.render_widget(messages.scroll((scroll, 0)), messages_area);
 
         let typing = self.editing == Some(Field::Message);
-        let prompt = Span::styled("> ", Style::new().fg(if typing { ACCENT } else { DIM }));
+        let prompt = Span::styled("> ", Style::new().fg(if typing { GOLD } else { MUTED }));
         let room = (input_area.width as usize).saturating_sub(3);
         let line = if typing || !self.draft.is_empty() {
             // The end of the draft, where the typing happens.
@@ -1992,7 +2013,7 @@ impl App {
         } else {
             Line::from(vec![
                 prompt,
-                Span::styled("Send message to type", Style::new().fg(DIM)),
+                Span::styled("Send message to type", Style::new().fg(MUTED)),
             ])
         };
         frame.render_widget(Paragraph::new(line), input_area);
@@ -2000,7 +2021,7 @@ impl App {
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
         let mut line = match &self.status {
-            Some(status) => Line::styled(format!(" {status}"), Style::new().fg(Color::Yellow)),
+            Some(status) => Line::styled(format!(" {status}"), Style::new().fg(GOLD)),
             None => {
                 let hints = match (self.editing, self.focus, self.section()) {
                     (Some(Field::Search), ..) => {
@@ -2020,23 +2041,23 @@ impl App {
                     }
                     (None, Focus::Actions, _) => "↑↓ move · Enter run · ← back · q quit",
                 };
-                Line::styled(format!(" {hints}"), Style::new().fg(DIM))
+                Line::styled(format!(" {hints}"), Style::new().fg(MUTED))
             }
         };
         let mut spans = Vec::new();
         if let Some(game) = &self.running {
             spans.push(Span::styled(
                 format!(" ▶ {}: {} ", game.title, game.state.trim_end_matches('.')),
-                Style::new().fg(Color::Green),
+                Style::new().fg(GREEN),
             ));
-            spans.push(Span::styled("│", Style::new().fg(DIM)));
+            spans.push(Span::styled("│", Style::new().fg(MUTED)));
         }
         if let Some(sync) = &self.syncing {
             spans.push(Span::styled(
                 format!(" ☁ {}: {} ", sync.title, sync.state.trim_end_matches('.')),
-                Style::new().fg(ACCENT),
+                Style::new().fg(GOLD),
             ));
-            spans.push(Span::styled("│", Style::new().fg(DIM)));
+            spans.push(Span::styled("│", Style::new().fg(MUTED)));
         }
         if let Some(download) = &self.download {
             let queued = match self.queue.len() {
@@ -2049,12 +2070,15 @@ impl App {
                     download.title,
                     download.state.trim_end_matches('.')
                 ),
-                Style::new().fg(ACCENT),
+                Style::new().fg(GOLD),
             ));
-            spans.push(Span::styled("│", Style::new().fg(DIM)));
+            spans.push(Span::styled("│", Style::new().fg(MUTED)));
         }
         spans.append(&mut line.spans);
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::new().bg(OLIVE_DARK)),
+            area,
+        );
     }
 }
 
@@ -2068,14 +2092,83 @@ fn toggle<T: Ord>(set: &mut BTreeSet<T>, item: T) -> bool {
     }
 }
 
+/// Whether the terminal shows 24-bit colors. Most say so in COLORTERM;
+/// Windows' consoles all do since Windows 10. Elsewhere, colors fall back
+/// to the nearest of the 256 that every terminal has.
+static TRUECOLOR: LazyLock<bool> = LazyLock::new(|| {
+    cfg!(windows) || std::env::var("COLORTERM").is_ok_and(|v| v == "truecolor" || v == "24bit")
+});
+
+/// The nearest color in xterm's 256: its 6×6×6 cube or its gray ramp.
+/// The first 16 are left out, since every theme changes them.
+fn to_256(color: Color) -> Color {
+    let Color::Rgb(r, g, b) = color else {
+        return color;
+    };
+    let distance = |(x, y, z): (u8, u8, u8)| {
+        [(r, x), (g, y), (b, z)]
+            .iter()
+            .map(|&(a, b)| (a as i32 - b as i32).pow(2))
+            .sum::<i32>()
+    };
+    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+    let nearest = |c: u8| {
+        (0..6)
+            .min_by_key(|&i| (LEVELS[i] as i32 - c as i32).abs())
+            .unwrap()
+    };
+    let (i, j, k) = (nearest(r), nearest(g), nearest(b));
+    let cube = (16 + 36 * i + 6 * j + k) as u8;
+    let cube_rgb = (LEVELS[i], LEVELS[j], LEVELS[k]);
+    let gray_step = ((r as u32 + g as u32 + b as u32) / 3).saturating_sub(3) / 10;
+    let gray_step = gray_step.min(23) as u8;
+    let gray = 8 + 10 * gray_step;
+    if distance((gray, gray, gray)) < distance(cube_rgb) {
+        Color::Indexed(232 + gray_step)
+    } else {
+        Color::Indexed(cube)
+    }
+}
+
+/// Light top and left edges, dark bottom and right ones, so a panel looks
+/// raised, as in old Steam. Only recolors the lines, not titles or the
+/// scrollbar's thumb.
+fn bevel(frame: &mut Frame, area: Rect) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let buf = frame.buffer_mut();
+    let (right, bottom) = (area.right() - 1, area.bottom() - 1);
+    let edges = (area.x..=right)
+        .map(|x| (x, area.y, HI))
+        .chain((area.y..=bottom).map(|y| (area.x, y, HI)))
+        .chain((area.x..=right).map(|x| (x, bottom, LO)))
+        .chain((area.y..=bottom).map(|y| (right, y, LO)));
+    for (x, y, color) in edges {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            let line = cell
+                .symbol()
+                .chars()
+                .next()
+                .is_some_and(|c| ('\u{2500}'..='\u{257f}').contains(&c));
+            if line {
+                cell.set_fg(color);
+            }
+        }
+    }
+}
+
 fn draw_scrollbar(frame: &mut Frame, column: Rect, list: Rect, len: usize, selected: usize) {
     if len <= list.height as usize {
         return;
     }
     let mut state = ScrollbarState::new(len).position(selected);
+    // The track is the border line itself; the thumb stands out from it.
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .begin_symbol(None)
-        .end_symbol(None);
+        .end_symbol(None)
+        .track_symbol(Some("│"))
+        .thumb_style(Style::new().fg(HI));
     // On the column's right border, beside the list.
     let track = Rect {
         x: column.x,
@@ -2104,9 +2197,9 @@ fn friend_label(friend: &Friend) -> String {
 
 fn message_lines(message: &Message, name: &str) -> Vec<Line<'static>> {
     let (who, color) = if message.from_me {
-        ("You".to_owned(), Color::Green)
+        ("You".to_owned(), GREEN)
     } else {
-        (name.to_owned(), ACCENT)
+        (name.to_owned(), GOLD)
     };
     let mut lines = message.text.lines();
     let first = lines.next().unwrap_or_default().to_owned();
@@ -2123,16 +2216,16 @@ fn message_lines(message: &Message, name: &str) -> Vec<Line<'static>> {
 
 fn game_item(game: &Game, favorite: bool, downloading: bool) -> ListItem<'static> {
     let (mark, color) = match &game.installed {
-        _ if downloading => ("↓", ACCENT),
-        Some(i) if i.by_fumes => ("●", Color::Green),
-        Some(i) if i.complete => ("●", Color::Blue),
-        Some(_) => ("◐", Color::Yellow),
-        None => ("○", DIM),
+        _ if downloading => ("↓", GOLD),
+        Some(i) if i.by_fumes => ("●", GREEN),
+        Some(i) if i.complete => ("●", DUSK),
+        Some(_) => ("◐", GOLD),
+        None => ("○", MUTED),
     };
     let star = if favorite { "★ " } else { "  " };
     ListItem::new(Line::from(vec![
         Span::styled(format!(" {mark}"), Style::new().fg(color)),
-        Span::styled(format!(" {star}"), Style::new().fg(Color::Yellow)),
+        Span::styled(format!(" {star}"), Style::new().fg(GOLD)),
         Span::raw(display_name(game)),
     ]))
 }
@@ -2204,7 +2297,7 @@ fn game_details(game: &Game) -> Vec<Line<'static>> {
 
 fn field(label: &str, value: String) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{label:<12}"), Style::new().fg(DIM)),
+        Span::styled(format!("{label:<12}"), Style::new().fg(MUTED)),
         Span::raw(value),
     ])
 }
@@ -2232,17 +2325,17 @@ fn draw_confirm(frame: &mut Frame, question: &str) {
     let text = Paragraph::new(vec![
         Line::raw(question.to_owned()),
         Line::raw(""),
-        Line::styled("[y] yes   [n] no", Style::new().fg(DIM)),
+        Line::styled("[y] yes   [n] no", Style::new().fg(MUTED)),
     ])
     .wrap(Wrap { trim: true })
     .block(
         Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(Color::Yellow))
-            .title(" Confirm "),
+            .title(" Confirm ")
+            .title_style(Style::new().fg(GOLD).add_modifier(Modifier::BOLD)),
     );
     frame.render_widget(Clear, area);
-    frame.render_widget(text, area);
+    frame.render_widget(text.style(Style::new().bg(OLIVE).fg(TEXT)), area);
+    bevel(frame, area);
 }
 
 /// `cancel`: what Esc does.
@@ -2256,19 +2349,19 @@ fn draw_conflict(frame: &mut Frame, title: &str, cancel: &str) {
         Line::raw(""),
         Line::styled(
             format!("[c] keep the cloud's   [l] keep this machine's   [Esc] {cancel}"),
-            Style::new().fg(DIM),
+            Style::new().fg(MUTED),
         ),
     ])
     .wrap(Wrap { trim: true })
     .block(
         Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(Color::Yellow))
             .title(" Cloud saves ")
+            .title_style(Style::new().fg(GOLD).add_modifier(Modifier::BOLD))
             .padding(Padding::horizontal(1)),
     );
     frame.render_widget(Clear, area);
-    frame.render_widget(text, area);
+    frame.render_widget(text.style(Style::new().bg(OLIVE).fg(TEXT)), area);
+    bevel(frame, area);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -2316,6 +2409,19 @@ fn hand_over(terminal: &mut DefaultTerminal, pending: &Pending) -> Result<bool> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colors_fall_back_to_the_nearest_of_256() {
+        assert_eq!(to_256(Color::Rgb(0, 0, 0)), Color::Indexed(16));
+        assert_eq!(to_256(Color::Rgb(255, 255, 255)), Color::Indexed(231));
+        assert_eq!(to_256(Color::Rgb(255, 0, 0)), Color::Indexed(196));
+        // Grays go to the ramp, which is finer than the cube's.
+        assert_eq!(to_256(Color::Rgb(128, 128, 128)), Color::Indexed(244));
+        assert_eq!(to_256(Color::Rgb(0x28, 0x2e, 0x22)), Color::Indexed(235));
+        // Anything not RGB is left alone.
+        assert_eq!(to_256(Color::Reset), Color::Reset);
+        assert_eq!(to_256(Color::Indexed(3)), Color::Indexed(3));
+    }
     use crate::friends::Persona;
     use crate::local::Installed;
     use futures::channel::mpsc::UnboundedReceiver;

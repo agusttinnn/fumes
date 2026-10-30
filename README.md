@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/logo.svg" width="128" height="128" alt="The fumes logo: smoke rising from a glowing vent"></p>
+<p align="center"><img src="assets/logo.png" width="128" height="128" alt="The fumes logo: a terminal prompt with smoke rising from the cursor"></p>
 
 # fumes — a lightweight Steam client for the terminal
 
